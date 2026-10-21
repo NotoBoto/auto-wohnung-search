@@ -1,0 +1,534 @@
+import asyncio
+import copy
+from datetime import datetime, timedelta
+
+import pytest
+
+import core
+from ai import AIError
+from mail import Reply
+from models import Listing
+from pipeline import Engine
+from sources.base import BlockedError, MissingFieldError, SourceBroken
+from store import Store
+
+T0 = datetime(2026, 10, 21, 10, 0, 0)   # наивный UTC = 12:00 в Бонне (CEST)
+PROFILE = {"salutation": "Herr", "first_name": "Max", "last_name": "Muster", "persons": 2,
+           "move_in": "sofort", "about": "Ingenieur, ruhig"}
+FILLER = ("Ich bin ruhig, zuverlässig und arbeite mit Freude in Bonn. Die Wohnung gefällt mir sehr, "
+          "und ich würde mich über einen Besichtigungstermin freuen. ")
+
+
+def letter(n: int) -> str:
+    text = f"Ich interessiere mich sehr für Ihre Wohnung, Anfrage Nummer {n}.\n" + FILLER * 6
+    return text[:900]
+
+
+class Clock:
+    def __init__(self, now: datetime = T0):
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+class FakeSource:
+    def __init__(self, name: str, listings=(), details=None):
+        self.name = name
+        self.filters = None
+        self.listings = list(listings)
+        self.details = details or {}
+        self.search_exc = None
+        self.send_exc = None
+        self.searches = 0
+        self.sent: list[tuple[str, str]] = []
+
+    async def search(self, page):
+        self.searches += 1
+        await asyncio.sleep(0)
+        if self.search_exc:
+            raise self.search_exc
+        return list(self.listings)
+
+    async def fetch_detail(self, page, l):
+        await asyncio.sleep(0)
+        return self.details.get(l.ext_id, l)
+
+    async def send(self, page, l, text, profile):
+        await asyncio.sleep(0)
+        if self.send_exc:
+            raise self.send_exc
+        self.sent.append((l.ext_id, text))
+
+
+class FakeAI:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+        self.exc = None
+        self.answer = None
+
+    async def generate(self, system, user):
+        self.calls.append((system, user))
+        await asyncio.sleep(0)
+        if self.exc:
+            raise self.exc
+        return self.answer if self.answer is not None else letter(len(self.calls))
+
+
+class FakeNotifier:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def names(self, name: str) -> list[tuple]:
+        return [c for c in self.calls if c[0] == name]
+
+    async def draft(self, row, text, warm_estimated):
+        self.calls.append(("draft", row.id, text, warm_estimated))
+        return 100 + len(self.calls)
+
+    async def ask_duplicate(self, row, match):
+        self.calls.append(("ask_duplicate", row.id, match.id))
+
+    async def ask_stuck(self, row):
+        self.calls.append(("ask_stuck", row.id))
+
+    async def reply(self, row, r):
+        self.calls.append(("reply", row.id if row else None, r))
+
+    async def incident(self, platform, kind, detail):
+        self.calls.append(("incident", platform, kind))
+
+    async def missing_profile(self):
+        self.calls.append(("missing_profile",))
+
+    async def digest(self, stats):
+        self.calls.append(("digest", stats))
+
+    async def remove_draft(self, row):
+        self.calls.append(("remove_draft", row.id))
+
+
+class FakeBrowser:
+    def __init__(self):
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def page(self, platform):
+        return object()
+
+    def lock(self, platform):
+        return self._locks.setdefault(platform, asyncio.Lock())
+
+
+class FakeMail:
+    def __init__(self, replies):
+        self.replies = replies
+
+    def fetch_new(self):
+        out, self.replies = self.replies, []
+        return out
+
+
+def L(platform="kleinanzeigen", ext_id="1", street="Musterstraße 12", **kw):
+    kw.setdefault("postcode", "53115")
+    kw.setdefault("warm_rent", 800)
+    kw.setdefault("rooms", 2)
+    kw.setdefault("area", 60)
+    kw.setdefault("contact_name", "Herr Müller")
+    kw.setdefault("description", "Schöne Wohnung in Bonn.")
+    return Listing(platform=platform, ext_id=ext_id, url=f"https://{platform}/{ext_id}", title="Wohnung",
+                   street=street, **kw)
+
+
+def make_cfg(mode="confirm", profile=PROFILE) -> dict:
+    cfg = copy.deepcopy(core.DEFAULTS)
+    cfg["mode"] = mode
+    cfg["profile"] = dict(profile)
+    return cfg
+
+
+class Env:
+    def __init__(self, mode="confirm", profile=PROFILE, store=None, clock=None, mail=None):
+        self.clock = clock or Clock()
+        self.cfg = make_cfg(mode, profile)
+        self.store = store or Store(":memory:", clock=self.clock)
+        self.ai = FakeAI()
+        self.ka = FakeSource("kleinanzeigen")
+        self.wg = FakeSource("wggesucht")
+        self.notifier = FakeNotifier()
+        self.browser = FakeBrowser()
+        self.engine = Engine(self.cfg, self.store, self.ai, {"kleinanzeigen": self.ka, "wggesucht": self.wg},
+                             self.browser, self.notifier, mail, clock=self.clock)
+
+
+@pytest.fixture
+def eng():
+    return Env()
+
+
+def sent_row(env, ext_id, street, when, platform="kleinanzeigen", contact="Herr Schmidt"):
+    i = env.store.add(L(platform, ext_id, street, contact_name=contact), 800)
+    env.store.set_status(i, "sent", letter=f"Erster Satz {ext_id}. Rest.", sent_at=when)
+    return i
+
+
+# ---------- process ----------
+
+async def test_auto_mode_sends_and_no_per_send_notification():
+    env = Env(mode="auto")
+    assert await env.engine.process("kleinanzeigen", L()) == "queued"
+    await env.engine.send_queued_once()
+    row = env.store.by_status("sent")[0]
+    assert env.ka.sent == [("1", row.letter)] and row.sent_at == T0
+    assert not env.notifier.names("draft") and env.notifier.calls == []
+
+
+async def test_confirm_mode_creates_draft(eng):
+    assert await eng.engine.process("kleinanzeigen", L()) == "draft"
+    drafts = eng.notifier.names("draft")
+    assert len(drafts) == 1
+    row = eng.store.by_status("draft")[0]
+    assert row.letter == drafts[0][2] and row.draft_msg_id == 101 and drafts[0][3] is False
+    await eng.engine.send_queued_once()
+    assert eng.ka.sent == []   # черновик сам не уходит
+
+
+async def test_platform_mode_overrides_global():
+    env = Env(mode="confirm")
+    env.cfg["platforms"]["wggesucht"]["mode"] = "auto"
+    assert env.engine.mode_for("wggesucht") == "auto" and env.engine.mode_for("kleinanzeigen") == "confirm"
+    assert await env.engine.process("wggesucht", L("wggesucht")) == "queued"
+
+
+async def test_same_flat_other_platform_not_sent_twice():
+    env = Env(mode="auto")
+    assert await env.engine.process("kleinanzeigen", L()) == "queued"
+    await env.engine.send_queued_once()
+    # та же квартира на другой площадке, адрес виден только в подробностях
+    teaser = L("wggesucht", "w1", street="", warm_rent=None)
+    env.wg.details["w1"] = L("wggesucht", "w1", street="Musterstr. 12", warm_rent=810)
+    assert await env.engine.process("wggesucht", teaser) == "duplicate"
+    # перевыложена с новым id на той же площадке
+    assert await env.engine.process("kleinanzeigen", L(ext_id="2")) == "duplicate"
+    await env.engine.send_queued_once()
+    assert len(env.ai.calls) == 1 and len(env.ka.sent) == 1 and env.wg.sent == []
+
+
+async def test_same_flat_two_platforms_concurrently_one_letter():
+    env = Env(mode="auto")
+    env.wg.details["w1"] = L("wggesucht", "w1")
+    res = await asyncio.gather(env.engine.process("kleinanzeigen", L()),
+                               env.engine.process("wggesucht", L("wggesucht", "w1", street="")))
+    assert sorted(res) == ["duplicate", "queued"]
+    assert len(env.ai.calls) == 1
+    await env.engine.send_queued_once()
+    assert len(env.ka.sent) + len(env.wg.sent) == 1
+
+
+async def test_known_listing_is_not_processed_again(eng):
+    assert await eng.engine.process("kleinanzeigen", L()) == "draft"
+    assert await eng.engine.process("kleinanzeigen", L()) == "draft"
+    assert len(eng.ai.calls) == 1 and len(eng.notifier.names("draft")) == 1
+
+
+async def test_similar_asks_once(eng):
+    assert await eng.engine.process("kleinanzeigen", L()) == "draft"
+    other = L("wggesucht", "w1", street="Musterstraße 14")
+    assert await eng.engine.process("wggesucht", other) == "ask_dup"
+    assert await eng.engine.process("wggesucht", other) == "ask_dup"
+    asks = eng.notifier.names("ask_duplicate")
+    assert len(asks) == 1 and len(eng.ai.calls) == 1
+    first = eng.store.by_status("draft")[0]
+    assert asks[0][2] == first.id
+
+
+async def test_resolve_duplicate(eng):
+    await eng.engine.process("kleinanzeigen", L())
+    await eng.engine.process("wggesucht", L("wggesucht", "w1", street="Musterstraße 14"))
+    await eng.engine.process("wggesucht", L("wggesucht", "w2", street="Musterstraße 16"))
+    a, b = (r.id for r in eng.store.by_status("ask_dup"))
+    await eng.engine.resolve_duplicate(a, send=False)
+    assert eng.store.get(a).status == "duplicate"
+    await eng.engine.resolve_duplicate(b, send=True)
+    assert eng.store.get(b).status == "draft" and len(eng.ai.calls) == 2
+
+
+async def test_filtered_with_reason(eng):
+    assert await eng.engine.process("kleinanzeigen", L(warm_rent=1200)) == "filtered"
+    assert eng.store.by_status("filtered")[0].reason == "дороже 900 €"
+    assert eng.ai.calls == []
+
+
+async def test_skip_answer_filters(eng):
+    eng.ai.answer = "SKIP: nur für Studenten"
+    assert await eng.engine.process("kleinanzeigen", L()) == "filtered"
+    assert eng.store.by_status("filtered")[0].reason == "nur für Studenten"
+
+
+# ---------- перезапуск ----------
+
+async def test_restart_with_sending_asks_and_does_not_resend():
+    env = Env(mode="auto")
+    i = env.store.add(L(), 800)
+    env.store.set_status(i, "sending", letter=letter(1))
+    await env.engine.startup()
+    await env.engine.send_queued_once()
+    await env.engine.maintenance_once()
+    assert env.notifier.names("ask_stuck") == [("ask_stuck", i)]
+    assert env.ka.sent == [] and env.store.get(i).status == "sending"
+    await env.engine.resolve_stuck(i, was_sent=True)
+    assert env.store.get(i).status == "sent" and env.ka.sent == []
+    j = env.store.add(L(ext_id="2", street="Andere Str. 1"), 800)
+    env.store.set_status(j, "sending", letter=letter(2))
+    await env.engine.resolve_stuck(j, was_sent=False)
+    assert env.store.get(j).status == "queued"
+
+
+async def test_never_sends_row_without_letter_or_generating():
+    env = Env(mode="auto")
+    i = env.store.add(L(), 800)
+    env.store.set_status(i, "queued", reason="generating")
+    j = env.store.add(L(ext_id="2", street="Andere Str. 1"), 800)
+    env.store.set_status(j, "queued")   # пустое письмо
+    await env.engine.send_queued_once()
+    assert env.ka.sent == []
+    await env.engine.startup()   # прерванная генерация → failed, можно перегенерировать
+    assert env.store.get(i).status == "failed" and env.store.get(i).reason == "прервано при генерации"
+    await env.engine.send_queued_once()
+    assert env.ka.sent == []
+
+
+# ---------- случаи (incidents) ----------
+
+async def test_captcha_twice_one_incident_others_continue():
+    env = Env(mode="auto")
+    env.ka.search_exc = BlockedError("captcha")
+    env.wg.listings = [L("wggesucht", "w1")]
+    await env.engine.poll_once("kleinanzeigen")
+    await env.engine.poll_once("kleinanzeigen")
+    await env.engine.poll_once("wggesucht")
+    assert env.notifier.names("incident") == [("incident", "kleinanzeigen", "captcha")]
+    assert env.engine.status()["paused"] == ["kleinanzeigen"]
+    assert env.ka.searches == 1                         # на паузе площадку не трогаем
+    assert env.store.by_status("queued")[0].platform == "wggesucht"
+    # после перезапуска открытый случай держит паузу, повторной капчи и сообщения нет
+    env2 = Env(mode="auto", store=env.store, clock=env.clock)
+    env2.ka.search_exc = BlockedError("captcha")
+    await env2.engine.startup()
+    await env2.engine.poll_once("kleinanzeigen")
+    assert env2.ka.searches == 0 and env2.notifier.names("incident") == []
+
+
+async def test_captcha_during_send_requeues_and_pauses():
+    env = Env(mode="auto")
+    await env.engine.process("kleinanzeigen", L())
+    env.ka.send_exc = BlockedError("logged_out")
+    await env.engine.send_queued_once()
+    await env.engine.send_queued_once()
+    assert env.store.by_status("queued") and env.notifier.names("incident") == [("incident", "kleinanzeigen", "logged_out")]
+    assert "kleinanzeigen" in env.engine.status()["paused"]
+
+
+async def test_source_broken_pauses_with_incident():
+    env = Env()
+    env.ka.search_exc = SourceBroken("селекторы")
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.notifier.names("incident") == [("incident", "kleinanzeigen", "broken")]
+    assert "kleinanzeigen" in env.engine.status()["paused"]
+
+
+async def test_resume_reopens_incidents():
+    env = Env()
+    env.ka.search_exc = BlockedError("captcha")
+    await env.engine.poll_once("kleinanzeigen")
+    env.engine.resume("kleinanzeigen")
+    assert env.engine.status()["paused"] == [] and env.store.open_incidents() == []
+    await env.engine.poll_once("kleinanzeigen")
+    assert len(env.notifier.names("incident")) == 2
+
+
+async def test_pause_all_and_resume_all():
+    env = Env()
+    env.engine.pause(None)
+    env.ka.listings = [L()]
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.ka.searches == 0
+    env.engine.resume(None)
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.ka.searches == 1
+
+
+async def test_ai_failure_marks_failed_single_incident(eng):
+    eng.ai.exc = AIError("нейросеть недоступна")
+    assert await eng.engine.process("kleinanzeigen", L()) == "failed"
+    assert await eng.engine.process("kleinanzeigen", L(ext_id="2", street="Andere Str. 1")) == "failed"
+    assert len(eng.store.by_status("failed")) == 2
+    assert eng.notifier.names("incident") == [("incident", "ai", "ai")]
+    eng.ai.exc = None   # нейросеть ожила: следующее письмо закрывает случай
+    assert await eng.engine.process("kleinanzeigen", L(ext_id="3", street="Dritte Str. 3")) == "draft"
+    assert eng.store.open_incidents() == []
+    failed = eng.store.by_status("failed")[0]
+    await eng.engine.regenerate(failed.id)
+    assert eng.store.get(failed.id).status == "draft"
+
+
+async def test_bad_letter_twice_is_failed(eng):
+    eng.ai.answer = "Hello, I would like the apartment."   # английский и короткий → LetterError после повтора
+    assert await eng.engine.process("kleinanzeigen", L()) == "failed"
+    assert len(eng.ai.calls) == 2 and len(eng.notifier.names("incident")) == 1
+
+
+# ---------- лимиты ----------
+
+async def test_daily_cap_keeps_queued():
+    env = Env(mode="auto")
+    for k in range(15):
+        sent_row(env, f"s{k}", f"Gasse {k}", T0 - timedelta(minutes=10 + k), contact=f"Kontakt {k}")
+    assert await env.engine.process("kleinanzeigen", L()) == "queued"
+    await env.engine.send_queued_once()
+    assert env.ka.sent == [] and len(env.store.by_status("queued")) == 1
+
+
+async def test_min_gap_between_sends():
+    env = Env(mode="auto")
+    await env.engine.process("kleinanzeigen", L())
+    await env.engine.process("kleinanzeigen", L(ext_id="2", street="Andere Str. 1", contact_name="Frau Weber"))
+    await env.engine.send_queued_once()
+    assert len(env.ka.sent) == 1
+    env.clock.now += timedelta(seconds=60)
+    await env.engine.send_queued_once()
+    assert len(env.ka.sent) == 1
+    env.clock.now += timedelta(seconds=61)
+    await env.engine.send_queued_once()
+    assert len(env.ka.sent) == 2
+
+
+async def test_missing_required_field_becomes_draft_in_auto():
+    env = Env(mode="auto")
+    assert await env.engine.process("kleinanzeigen", L(required_fields=["phone"])) == "draft"
+    assert len(env.notifier.names("draft")) == 1
+    # форма потребовала поле при отправке
+    env.ka.send_exc = MissingFieldError("phone")
+    assert await env.engine.process("kleinanzeigen", L(ext_id="2", street="Andere Str. 1")) == "queued"
+    await env.engine.send_queued_once()
+    assert env.store.get(2).status == "draft" and len(env.notifier.names("draft")) == 2
+
+
+async def test_send_error_marks_failed_with_incident():
+    env = Env(mode="auto")
+    await env.engine.process("kleinanzeigen", L())
+    env.ka.send_exc = RuntimeError("кнопка не найдена")
+    await env.engine.send_queued_once()
+    assert env.store.by_status("failed") and env.notifier.names("incident") == [("incident", "kleinanzeigen", "send")]
+
+
+async def test_profile_incomplete_no_letter():
+    env = Env(mode="auto", profile={})
+    assert await env.engine.process("kleinanzeigen", L()) == "seen"
+    assert await env.engine.process("kleinanzeigen", L(ext_id="2", street="Andere Str. 1")) == "seen"
+    assert env.ai.calls == [] and len(env.notifier.names("missing_profile")) == 1
+    env.clock.now += timedelta(hours=24)
+    await env.engine.process("kleinanzeigen", L(ext_id="3", street="Dritte Str. 3"))
+    assert len(env.notifier.names("missing_profile")) == 2
+
+
+async def test_contact_cap(eng):
+    for k in range(3):
+        sent_row(eng, f"s{k}", f"Gasse {k}", T0 - timedelta(days=k + 1), contact="Herr Müller")
+    assert await eng.engine.process("kleinanzeigen", L()) == "filtered"
+    assert eng.store.get(4).reason == "лимит контакта" and eng.ai.calls == []
+
+
+# ---------- обслуживание ----------
+
+async def test_draft_expires_after_12h(eng):
+    await eng.engine.process("kleinanzeigen", L())
+    eng.clock.now = T0 + timedelta(hours=11, minutes=59)
+    await eng.engine.maintenance_once()
+    assert eng.store.get(1).status == "draft" and not eng.notifier.names("remove_draft")
+    eng.clock.now = T0 + timedelta(hours=12)
+    await eng.engine.maintenance_once()
+    await eng.engine.maintenance_once()
+    assert eng.store.get(1).status == "skipped" and eng.notifier.names("remove_draft") == [("remove_draft", 1)]
+
+
+async def test_digest_once_at_20(eng):
+    eng.store.add(L(), 800)
+    eng.clock.now = datetime(2026, 10, 21, 17, 59)   # 19:59 в Бонне
+    await eng.engine.maintenance_once()
+    assert not eng.notifier.names("digest")
+    eng.clock.now = datetime(2026, 10, 21, 18, 0)    # 20:00
+    await eng.engine.maintenance_once()
+    eng.clock.now = datetime(2026, 10, 21, 18, 1)    # 20:01
+    await eng.engine.maintenance_once()
+    digests = eng.notifier.names("digest")
+    assert len(digests) == 1 and digests[0][1]["found"] == 1
+    eng.clock.now = datetime(2026, 10, 22, 18, 0)    # следующий день
+    await eng.engine.maintenance_once()
+    assert len(eng.notifier.names("digest")) == 2
+
+
+async def test_digest_counts_local_day():
+    env = Env()
+    env.clock.now = datetime(2026, 10, 20, 22, 30)   # 00:30 21.10 в Бонне — уже «сегодня»
+    env.store.add(L(), 800)
+    env.clock.now = datetime(2026, 10, 21, 18, 0)
+    await env.engine.maintenance_once()
+    assert env.notifier.names("digest")[0][1]["found"] == 1
+
+
+# ---------- почта ----------
+
+async def test_unmatched_reply_still_notified():
+    unknown = Reply("kleinanzeigen", "999", "", "Frau X", "Hallo", "https://k/m")
+    env = Env(mode="auto", mail=None)
+    env.engine.mail = FakeMail([unknown])
+    await env.engine.process("kleinanzeigen", L())
+    await env.engine.send_queued_once()
+    known = Reply("kleinanzeigen", "1", "", "", "Termin am Montag?", "https://k/m2")
+    env.engine.mail.replies.append(known)
+    await env.engine.mail_once()
+    replies = env.notifier.names("reply")
+    assert replies == [("reply", None, unknown), ("reply", 1, known)]
+    assert env.store.day_stats(T0.date())["replies"] == 1
+
+
+# ---------- действия из бота ----------
+
+async def test_approve_with_edited_text_sends_that_text(eng):
+    await eng.engine.process("kleinanzeigen", L())
+    await eng.engine.approve(1, "Mein eigener Text.")
+    assert eng.ka.sent == [("1", "Mein eigener Text.")]
+    row = eng.store.get(1)
+    assert row.status == "sent" and row.letter == "Mein eigener Text."
+    await eng.engine.approve(1)   # повторное нажатие ничего не шлёт
+    assert len(eng.ka.sent) == 1
+
+
+async def test_approve_over_cap_stays_queued(eng):
+    for k in range(15):
+        sent_row(eng, f"s{k}", f"Gasse {k}", T0 - timedelta(minutes=10 + k), contact=f"Kontakt {k}")
+    await eng.engine.process("kleinanzeigen", L())
+    n = len(eng.notifier.calls)
+    await eng.engine.approve(16)
+    assert eng.store.get(16).status == "queued" and eng.ka.sent == [] and len(eng.notifier.calls) == n
+
+
+async def test_regenerate_and_skip(eng):
+    await eng.engine.process("kleinanzeigen", L())
+    await eng.engine.regenerate(1, "kürzer")
+    assert "Wunsch: kürzer" in eng.ai.calls[-1][1]
+    assert len(eng.notifier.names("draft")) == 2 and eng.store.get(1).status == "draft"
+    await eng.engine.skip(1)
+    assert eng.store.get(1).status == "skipped"
+
+
+async def test_platform_without_source_is_skipped():
+    env = Env()
+    env.cfg["platforms"]["immowelt"]["enabled"] = True
+    env.ka.listings = [L()]
+    task = asyncio.create_task(env.engine.run())
+    for _ in range(50):
+        await asyncio.sleep(0)
+    await env.engine.stop()
+    await asyncio.wait_for(task, 1)
+    assert env.ka.searches == 1 and env.ka.filters is env.cfg["filters"]

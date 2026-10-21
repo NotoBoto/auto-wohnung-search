@@ -223,8 +223,12 @@ class Store:
                     (listing_id, excerpt, link, _ts(self._clock())))
 
     def day_stats(self, day: date) -> dict:
-        lo = _ts(datetime(day.year, day.month, day.day))
-        hi = _ts(datetime(day.year, day.month, day.day) + timedelta(days=1))
+        start = datetime(day.year, day.month, day.day)
+        return self.stats_between(start, start + timedelta(days=1))
+
+    def stats_between(self, start: datetime, end: datetime) -> dict:
+        """Сводка за [start, end) в наивном UTC; Engine передаёт границы местных суток."""
+        lo, hi = _ts(start), _ts(end)
         db = self._db
 
         def count(table: str, col: str, extra: str = "") -> int:
