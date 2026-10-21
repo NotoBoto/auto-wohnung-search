@@ -159,3 +159,17 @@ async def test_send_unconfirmed_after_click_is_not_not_submitted(fast):
     with pytest.raises(RuntimeError) as e:
         await Kleinanzeigen().send(page, AD, "Hallo", {})
     assert not isinstance(e.value, (NotSubmittedError, SourceBroken)) and page.submitted
+
+
+async def test_send_logged_out_blocks_before_click(fast):
+    page = FakePage(KA_FORM + ("[data-testid='login-button']",))   # шапка с «Einloggen» — сессия вышла
+    with pytest.raises(BlockedError) as e:
+        await Kleinanzeigen().send(page, AD, "Hallo", {})
+    assert e.value.kind == "logged_out" and page.clicks == []
+
+
+async def test_send_ignores_unrelated_textarea(fast):
+    page = FakePage(("#viewad-contact-button", "textarea"))   # чужое поле (например, поиск) — не форма сообщения
+    with pytest.raises(NotSubmittedError):
+        await Kleinanzeigen().send(page, AD, "Hallo", {})
+    assert page.typed == "" and not page.submitted

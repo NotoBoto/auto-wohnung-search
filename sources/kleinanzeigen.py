@@ -17,6 +17,7 @@ _PLZ_RE = re.compile(r"\b(\d{5})\b\s*(?:Bonn\s*-\s*)?(.*)")
 _EMPTY_RE = re.compile(r"srchrslt-noresult|keine\s+(?:Anzeigen|Ergebnisse|Treffer)\s+gefunden", re.I)   # маркер пустой выдачи: не проверено вживую
 _BLOCK_RE = re.compile(r"geetest|captcha|Zugriff verweigert|Access Denied", re.I)
 _NORMAL_MARKERS = ('id="viewad-title"', "srchrslt", "data-adid=")
+_LOGIN_BUTTON = "[data-testid='login-button']"   # «Einloggen» в шапке — пользователь не вошёл (не проверено вживую)
 
 
 def _text(s: str) -> str:
@@ -164,7 +165,7 @@ class Kleinanzeigen(Source):
             await accept_consent(page)
         if kind := self.detect_block(await page.content(), page.url):
             raise BlockedError(kind)
-        return await page.locator("[data-testid='login-button']").count() == 0
+        return await page.locator(_LOGIN_BUTTON).count() == 0
 
     # не проверено вживую — проверить после входа пользователя
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
@@ -184,8 +185,10 @@ class Kleinanzeigen(Source):
     async def _fill_form(self, page, l: Listing, text: str, profile: dict) -> None:
         """Всё до нажатия «Отправить»."""
         await self._open(page, l.url)
+        if await page.locator(_LOGIN_BUTTON).count():   # сессия вышла: кнопка открыла бы окно входа
+            raise BlockedError("logged_out", "kleinanzeigen: вход в аккаунт не выполнен")
         btn = page.locator("#viewad-contact-button-login-modal, #viewad-contact-button, button:has-text('Nachricht schreiben')").first
-        msg = page.locator("textarea[name='message'], #viewad-contact-message, textarea").first
+        msg = page.locator("textarea[name='message'], #viewad-contact-message").first   # не любое поле: только форма сообщения
         try:
             await btn.click(timeout=8000)
             await msg.wait_for(state="visible", timeout=8000)
