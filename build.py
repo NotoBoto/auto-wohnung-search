@@ -43,6 +43,8 @@ def main():
         "--add-data", f"{ROOT / 'assets' / 'icon.ico'}{sep}assets",
         "--add-data", f"{ROOT / 'assets' / 'notify.wav'}{sep}assets",
         "--collect-data", "customtkinter",      # темы и шрифты customtkinter
+        "--collect-all", "playwright",          # драйвер Playwright (node); браузер не нужен — используется Edge
+        "--collect-data", "tzdata",             # zoneinfo в собранной программе берёт часовые пояса отсюда
         "--hidden-import", "pystray._win32",    # pystray выбирает бэкенд при запуске
         str(ROOT / "app.py"),
     ], check=True)

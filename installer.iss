@@ -1,7 +1,7 @@
 ﻿; Установщик Auto Wohnung Search (Inno Setup 6). Собирается из build.py:
 ;   ISCC /DAppVersion=0.1.0 /DSourceDir=dist\Auto Wohnung Search /Odist installer.iss
-; Ставится без прав администратора в %LOCALAPPDATA%\Programs. Данные (настройки, сессии)
-; программа хранит в %APPDATA%\Auto Wohnung Search — обновление их не трогает.
+; Ставится без прав администратора в %LOCALAPPDATA%\Programs. Данные (настройки, промпт, профиль,
+; вход на площадки) программа хранит в %APPDATA%\Auto Wohnung Search — обновление их не трогает.
 ; Автообновление запускает установщик так:  /SILENT /UPDATED=1 /RUN=0|1 /TRAY=0|1
 
 #ifndef AppVersion
@@ -87,8 +87,8 @@ begin
     Exit;
   DataDir := ExpandConstant('{userappdata}\Auto Wohnung Search');
   if DirExists(DataDir) and not UninstallSilent then
-    if MsgBox('Удалить также настройки, промпты и данные входа?' + #13#10 + DataDir + #13#10#13#10 +
-              'Нет — оставить: при повторной установке не придётся заново всё настраивать и входить в аккаунты.',
+    if MsgBox('Удалить также настройки, промпт, профиль и данные входа на площадки?' + #13#10 + DataDir + #13#10#13#10 +
+              'Нет — оставить: при повторной установке не придётся заново настраивать программу и входить на площадки.',
               mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
       DelTree(DataDir, True, True, True);
 end;
