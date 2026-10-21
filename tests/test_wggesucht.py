@@ -143,6 +143,28 @@ def test_detect_block():
     assert WgGesucht.detect_block(read("wggesucht/detail.html"), URL) is None
 
 
+@pytest.mark.parametrize("html", [
+    '<div id="main_column"><h2>Bitte lösen Sie das Captcha</h2></div>',
+    '<div id="main_column">Zugriff verweigert</div>',
+    '<html><head><title>Just a moment...</title></head><body><div id="main_column"></div></body></html>',
+    '<div id="main_column"><script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=1&cf-chl=x"></script></div>',
+    '<div id="main_column">Checking your browser before accessing wg-gesucht.de</div>',
+])
+def test_detect_block_inside_site_layout(html):
+    # страница проверки внутри обычного макета сайта (main_column есть везде) — всё равно капча
+    assert WgGesucht.detect_block(html, "https://www.wg-gesucht.de/x") == "captcha"
+
+
+@pytest.mark.parametrize("name", ["search.html", "detail.html", "detail_limited.html", "detail_open.html"])
+def test_detect_block_fixtures_ok(name):
+    assert WgGesucht.detect_block(read(f"wggesucht/{name}"), "https://www.wg-gesucht.de/x") is None
+
+
+def test_detect_block_ignores_captcha_input_attribute():
+    html = '<div id="main_column"><form><label data-input="captcha">Sicherheitscode</label></form></div>'
+    assert WgGesucht.detect_block(html, "https://www.wg-gesucht.de/x") is None
+
+
 async def test_is_logged_in_captcha_raises():
     class P:
         url = "https://www.wg-gesucht.de/"

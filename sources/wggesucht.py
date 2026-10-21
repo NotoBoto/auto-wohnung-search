@@ -16,8 +16,11 @@ _CARD_RE = re.compile(r'(<a\b[^>]*\bclass="wgg-list-card offer_list_item[^"]*"[^
 _TAG_RE = re.compile(r"<[^>]+>")
 _DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
 _EMPTY_RE = re.compile(r"keine\s+(?:Anzeigen|Angebote|Ergebnisse|Treffer)\s+gefunden", re.I)   # маркер пустой выдачи: не проверено вживую
-_BLOCK_RE = re.compile(r"captcha|Zugriff verweigert|Access Denied|not a robot", re.I)
-_NORMAL_MARKERS = ("offer_list_item", "detailed-view-title", 'id="main_column"')
+_BLOCK_RE = re.compile(r"captcha|Zugriff verweigert|Access Denied|not a robot|Just a moment|cf-chl|"
+                       r"Checking your browser", re.I)
+_HARMLESS_RE = re.compile(r'data-input="captcha"', re.I)   # поле формы входа/регистрации — не проверка
+# только признаки конкретных страниц (выдача, объявление, форма сообщения): main_column есть на любой странице сайта
+_NORMAL_MARKERS = ("offer_list_item", "detailed-view-title", 'id="message_input"')
 
 
 def _text(s: str) -> str:
@@ -182,7 +185,7 @@ class WgGesucht(Source):
         if "modal=sign_in" in url:
             return "logged_out"
         if not any(m in html for m in _NORMAL_MARKERS):
-            if _BLOCK_RE.search(html):
+            if _BLOCK_RE.search(_HARMLESS_RE.sub("", html)):
                 return "captcha"
             if len(html) < 3000 and re.search(r"\b(403|429)\b", html):
                 return "blocked"
