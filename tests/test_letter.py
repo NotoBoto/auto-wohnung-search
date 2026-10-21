@@ -23,8 +23,8 @@ GOOD_DE_800 = (
 )
 OTHER_DE_800 = (
     "Guten Tag Frau Schmidt,\n\n"
-    "mit großem Interesse habe ich Ihre Anzeige für die helle Zweizimmerwohnung gelesen, denn der Balkon und "
-    "die Nähe zur Straßenbahn passen perfekt zu meinem Alltag. Ich heiße Max Muster, bin Softwareentwickler "
+    "Ein Balkon mit Blick ins Grüne und die Straßenbahn direkt vor der Tür, das passt genau zu meinem "
+    "Alltag. Ich heiße Max Muster, bin Softwareentwickler "
     "und seit Jahren unbefristet bei einer Firma in Bonn beschäftigt. Ich rauche nicht, habe keine Tiere und "
     "bin ein ruhiger, ordentlicher Mieter, der pünktlich zahlt. Meine Unterlagen sind vollständig und liegen "
     "bereit: Schufa, Einkommensnachweise und eine Bescheinigung des bisherigen Vermieters. Gerne würde ich "
@@ -160,3 +160,19 @@ def test_address_form():
     assert address_form(L(description="Hast du Lust? Melde dich gerne bei mir, dann zeige ich dir alles.")) == "du"
     assert address_form(L(description="Wir freuen uns auf Ihre Anfrage. Bitte senden Sie uns Ihre Unterlagen.")) == "Sie"
     assert address_form(L(description="")) == "Sie"
+
+
+def test_hidden_as_string_hides_fields():
+    msg = build_user_message(L(), {**PROFILE, "net_income": "3200", "phone": "0170", "hidden": "net_income, phone"}, "Sie")
+    assert "3200" not in msg and "0170" not in msg
+
+
+async def test_skizze_is_not_skip():
+    r = await generate_letter(FakeAI(["Skizze " + GOOD_DE_800]), "p", L(), PROFILE)
+    assert r.skip_reason is None and r.text.startswith("Skizze")
+
+
+async def test_length_wish_says_too_short():
+    ai = FakeAI(["Hallo", GOOD_DE_800])
+    await generate_letter(ai, "p", L(), PROFILE)
+    assert "zu kurz (5 Zeichen)" in ai.calls[1][1] and "Entwurf" not in ai.calls[1][1]

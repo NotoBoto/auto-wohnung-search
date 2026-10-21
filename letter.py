@@ -74,7 +74,8 @@ def _fmt(v) -> str:
 
 def build_user_message(l: Listing, profile: dict, form: str, wish: str = "",
                        avoid_openings: Sequence[str] = ()) -> str:
-    hidden = set(profile.get("hidden") or [])
+    h = profile.get("hidden") or []
+    hidden = {x.strip() for x in h.split(",")} if isinstance(h, str) else {str(x).strip() for x in h}
     lines = [f"Titel: {l.title}",
              f"Adresse: {' '.join(p for p in (l.street, l.postcode, l.district) if p)}"]
     for label, v in (("Kaltmiete", l.cold_rent), ("Nebenkosten", l.extra_costs),
@@ -95,10 +96,8 @@ def build_user_message(l: Listing, profile: dict, form: str, wish: str = "",
 
 
 def _skip_reason(answer: str) -> str | None:
-    t = answer.strip()
-    if not t[:4].upper() == "SKIP":
-        return None
-    return t[4:].lstrip().lstrip(":").strip()
+    m = re.match(r"\s*SKIP\b", answer, re.IGNORECASE)
+    return answer[m.end():].lstrip().lstrip(":").strip() if m else None
 
 
 def _problems(text: str, avoid_openings: Sequence[str]) -> list[tuple[str, str]]:
@@ -106,14 +105,15 @@ def _problems(text: str, avoid_openings: Sequence[str]) -> list[tuple[str, str]]
     out = []
     n = len(text)
     if not MIN_LEN <= n <= MAX_LEN:
+        how = "kurz" if n < MIN_LEN else "lang"
         out.append((f"длина {n} знаков (нужно {MIN_LEN}–{MAX_LEN})",
-                    f"Der letzte Entwurf hatte {n} Zeichen. Schreibe den Brief neu mit {MIN_LEN} bis {MAX_LEN} Zeichen."))
+                    f"Der Text war zu {how} ({n} Zeichen) – schreibe 800–1000 Zeichen (nie unter {MIN_LEN} oder über {MAX_LEN})."))
     if not looks_german(text):
         out.append(("не на немецком", "Schreibe den Brief ausschließlich auf Deutsch."))
     opening = first_sentence(text).casefold()
     if opening and opening in {first_sentence(s).casefold() or s.strip().casefold() for s in avoid_openings}:
         out.append(("повторяет начало прежнего письма",
-                    "Beginne mit einem völlig anderen ersten Satz als im letzten Entwurf."))
+                    "Beginne mit einem völlig anderen ersten Satz (siehe die verbotenen ersten Sätze)."))
     return out
 
 
