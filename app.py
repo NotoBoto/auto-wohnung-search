@@ -684,7 +684,11 @@ class App(ctk.CTk):
             notes.append("Gmail не указан — ответы арендодателей определяться не будут.")
         if not profile_complete(c["profile"]):
             notes.append("Профиль не заполнен — заполни профиль в боте: /profile.")
-        if notes:
+        if notes and auto:   # автозапуск без людей: модальное окно заблокировало бы его
+            log.warning("Запуск: %s", " ".join(notes))
+            if self.tray:
+                self.tray.notify(" ".join(notes))
+        elif notes:
             messagebox.showwarning("Запуск", " ".join(notes))
         return True
 
@@ -739,7 +743,7 @@ class App(ctk.CTk):
             log.error("Работа движка прервалась: %r", task.exception())
 
     async def _stop_engine(self):
-        """Останавливает движок, бота и браузеры. Каждый шаг — отдельно: сбой одного не мешает остальным."""
+        """Останавливает движок и бота (браузер не трогает). Каждый шаг — отдельно: сбой одного не мешает остальным."""
         engine, task, bot_app = self.engine, self.run_task, self.bot_app
         if engine:
             await engine.stop()
@@ -761,11 +765,15 @@ class App(ctk.CTk):
                 await stop_bot(bot_app)
             except Exception:
                 log.exception("Ошибка при остановке бота")
+        self.engine = self.bot_app = self.run_task = None
+
+    async def _close_browser(self):
+        """Браузеры живут весь сеанс (окно входа может быть открыто и при остановленной работе) —
+        закрываем их только при выходе из программы."""
         try:
-            await self.browser.close()
+            await asyncio.wait_for(self.browser.close(), 15)
         except Exception:
             log.exception("Ошибка при закрытии браузера")
-        self.engine = self.bot_app = self.run_task = None
 
     def stop_run(self):
         if self.busy:
@@ -898,11 +906,12 @@ class App(ctk.CTk):
         """Убирает значок — перед выходом и перед обновлением (движок остановится здесь же)."""
         if self.tray:
             self.tray.stop()
-        if self.status != "stopped" or self.engine:   # остановить работу и закрыть браузеры до выхода
-            try:
+        try:   # остановить работу, если идёт, и всегда закрыть браузеры: окно входа могло быть открыто и так
+            if self.status != "stopped" or self.engine:
                 self.submit(self._stop_engine()).result(STOP_WAIT + 20)
-            except Exception as e:
-                log.warning("Остановка при выходе: %r", e)
+            self.submit(self._close_browser()).result(25)
+        except Exception as e:
+            log.warning("Остановка при выходе: %r", e)
         self.status = "stopped"
         self.save()
 
