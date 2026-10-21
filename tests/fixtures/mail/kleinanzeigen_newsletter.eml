@@ -1,0 +1,35 @@
+From: Kleinanzeigen <newsletter@mail.kleinanzeigen.de>
+To: Max Beispiel <max.beispiel@gmail.com>
+Subject: Neue Anzeigen =?utf-8?q?f=C3=BCr?= Ihre Suche "Wohnung Bonn"
+Date: Wed, 21 Oct 2026 09:30:00 +0000
+Message-ID: <ka2@example.invalid>
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="===============3819903098204696374=="
+
+--===============3819903098204696374==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+Hallo Max,
+
+f=C3=BCr Ihre gespeicherte Suche gibt es 12 neue Anzeigen:
+
+2-Zimmer-Wohnung Bonn-Beuel, 750 EUR
+https://www.kleinanzeigen.de/s-anzeige/2-zimmer-bonn-beuel/3500000001-203-237=
+00
+
+Suche verwalten: https://www.kleinanzeigen.de/m-meine-suchen.html
+--
+Sie erhalten diese E-Mail, weil Sie eine Suche abonniert haben.
+
+--===============3819903098204696374==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<html><body><p>12 neue Anzeigen f&uuml;r Ihre Suche</p><a href=3D"https://www=
+.kleinanzeigen.de/s-anzeige/2-zimmer-bonn-beuel/3500000001-203-23700">2-Zimme=
+r Bonn-Beuel</a></body></html>
+
+--===============3819903098204696374==--

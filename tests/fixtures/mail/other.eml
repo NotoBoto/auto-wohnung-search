@@ -1,0 +1,26 @@
+From: Max Freund <freund@example.com>
+To: Max Beispiel <max.beispiel@gmail.com>
+Subject: Neue Nachricht zu unserer Wohnung
+Date: Wed, 21 Oct 2026 09:30:00 +0000
+Message-ID: <o1@example.invalid>
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="===============2928378777559743141=="
+
+--===============2928378777559743141==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+Hallo Max,
+
+neue Nachricht: https://www.kleinanzeigen.de/s-anzeige/x/1234567890-203-1
+Bis bald
+
+--===============2928378777559743141==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<html><body>Hallo Max</body></html>
+
+--===============2928378777559743141==--
