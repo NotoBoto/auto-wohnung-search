@@ -27,26 +27,47 @@ class Browser:
     def __init__(self, base: Path):
         self._root = Path(base) / "browser_profiles"
         self._pw = None
+        self._pw_lock = asyncio.Lock()   # запуск драйвера Playwright — один на всех
         self._ctx: dict[str, BrowserContext] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._open_locks: dict[str, asyncio.Lock] = {}
 
     def lock(self, platform: str) -> asyncio.Lock:
-        """Блокировка площадки: параллельной работы одной площадки нет."""
+        """Рабочая блокировка площадки. Вызывающий (Engine) обязан держать её на всё время search/fetch/send:
+        параллельной работы одной площадки нет. page() её не берёт, show_login() берёт сам."""
         return self._locks.setdefault(platform, asyncio.Lock())
 
+    async def _playwright(self):
+        async with self._pw_lock:
+            if self._pw is None:
+                self._pw = await async_playwright().start()
+            return self._pw
+
+    async def _launch(self, platform: str) -> BrowserContext:
+        pw = await self._playwright()
+        udir = self._root / platform
+        udir.mkdir(parents=True, exist_ok=True)
+        ctx = await pw.chromium.launch_persistent_context(
+            str(udir), channel="msedge", headless=False, args=["--window-position=-32000,-32000"],
+            locale="de-DE", viewport={"width": 1366, "height": 850})
+        # пользователь закрыл окно Edge: контекст мёртв, следующий page() запустит его заново
+        ctx.on("close", lambda *_: self._ctx.get(platform) is ctx and self._ctx.pop(platform, None))
+        self._ctx[platform] = ctx
+        return ctx
+
     async def page(self, platform: str) -> Page:
-        async with self.lock(f"_open_{platform}"):
-            ctx = self._ctx.get(platform)
-            if ctx is None:
-                if self._pw is None:
-                    self._pw = await async_playwright().start()
-                udir = self._root / platform
-                udir.mkdir(parents=True, exist_ok=True)
-                ctx = await self._pw.chromium.launch_persistent_context(
-                    str(udir), channel="msedge", headless=False, args=["--window-position=-32000,-32000"],
-                    locale="de-DE", viewport={"width": 1366, "height": 850})
-                self._ctx[platform] = ctx
-            return ctx.pages[0] if ctx.pages else await ctx.new_page()
+        """Живая страница площадки; закрытый контекст/страница пересоздаются. Не берёт lock(platform):
+        работу с возвращённой страницей вызывающий обязан вести под `async with browser.lock(platform)`."""
+        async with self._open_locks.setdefault(platform, asyncio.Lock()):
+            for _ in range(2):
+                ctx = self._ctx.get(platform) or await self._launch(platform)
+                try:
+                    live = [p for p in ctx.pages if not p.is_closed()]
+                    return live[0] if live else await ctx.new_page()
+                except Exception:   # контекст закрыт вместе с окном
+                    if self._ctx.get(platform) is ctx:
+                        del self._ctx[platform]
+            raise RuntimeError(f"не удалось открыть браузер для {platform}")
 
     async def _move(self, platform: str, pos: dict) -> None:
         ctx = self._ctx.get(platform)
@@ -61,10 +82,11 @@ class Browser:
             await cdp.detach()
 
     async def show_login(self, platform: str, url: str) -> None:
-        page = await self.page(platform)
-        await self._move(platform, ONSCREEN)
-        await page.goto(url)
-        await page.bring_to_front()
+        async with self.lock(platform):
+            page = await self.page(platform)
+            await self._move(platform, ONSCREEN)
+            await page.goto(url)
+            await page.bring_to_front()
 
     async def hide(self, platform: str) -> None:
         await self._move(platform, OFFSCREEN)
@@ -76,6 +98,7 @@ class Browser:
             except Exception:
                 pass
         self._ctx.clear()
-        if self._pw is not None:
-            await self._pw.stop()
-            self._pw = None
+        async with self._pw_lock:
+            if self._pw is not None:
+                await self._pw.stop()
+                self._pw = None

@@ -31,7 +31,9 @@ class MissingFieldError(RuntimeError):
 class Source(ABC):
     name: str
     login_url: str
-    filters: dict = {}   # фильтры поиска; Engine выставляет их на экземпляре
+
+    def __init__(self, filters: dict | None = None):
+        self.filters = filters if filters is not None else {}   # фильтры поиска; Engine может менять на экземпляре
 
     @abstractmethod
     def search_url(self, filters: dict) -> str: ...
