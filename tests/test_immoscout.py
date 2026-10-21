@@ -56,3 +56,8 @@ async def test_parse_detail_and_send_raise_source_broken():
         ImmoScout.parse_detail("<html></html>", l)
     with pytest.raises(SourceBroken):
         await ImmoScout().send(_Page(""), l, "hi", {})
+
+
+def test_challenge_page_with_expose_link_is_captcha():
+    html = (FIX / "captcha.html").read_text(encoding="utf-8").replace("</body>", '<a href="/expose/123">x</a></body>')
+    assert ImmoScout.detect_block(html, URL) == "captcha"

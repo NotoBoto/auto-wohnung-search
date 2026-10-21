@@ -8,7 +8,6 @@ from sources.base import BlockedError, Source, SourceBroken
 
 BASE = "https://www.immobilienscout24.de"
 _BLOCK_RE = re.compile(r"<title>Ich bin kein Roboter|<awswaf-captcha|id=\"captcha-container\"", re.I)
-_NORMAL_MARKERS = ("resultListModel", "__NEXT_DATA__", "/expose/")   # маркеры обычной страницы: не проверено вживую
 
 
 class ImmoScout(Source):
@@ -33,8 +32,6 @@ class ImmoScout(Source):
 
     @staticmethod
     def detect_block(html: str, url: str) -> str | None:
-        if any(m in html for m in _NORMAL_MARKERS):
-            return None
         return "captcha" if _BLOCK_RE.search(html) else None
 
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
