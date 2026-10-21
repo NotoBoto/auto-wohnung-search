@@ -493,7 +493,15 @@ class App(ctk.CTk):
         self.conf = core.load_config()
         self.conf.setdefault("mail_state", {})   # состояние чтения Gmail (последнее письмо); обновляет MailWatcher
         self._saved_mail = json.dumps(self.conf["mail_state"], sort_keys=True)
-        self.save()
+        if core.config_backup:   # не затираем сразу: пользователь может восстановить настройки из копии
+            log.warning("Файл настроек был повреждён — взяты значения по умолчанию (токен бота, ключи, Gmail и "
+                        "профиль пусты). Копия старого файла: %s. Восстановите настройки из неё или введите заново.",
+                        core.config_backup)
+            if not self.conf.get("owner_chat_id"):
+                log.warning("Владелец бота не восстановлен: бот запомнит владельцем первого, кто напишет ему /start. "
+                            "Напишите боту /start сами сразу после запуска.")
+        else:
+            self.save()
         self.status = "stopped"   # нужен сразу — меню трея читает его из своего потока
         self.busy = False         # идёт запуск или остановка — кнопка «Запустить» занята
         # Движок, бот и браузер — в одном цикле asyncio в своём потоке. Браузер и хранилище живут весь сеанс:

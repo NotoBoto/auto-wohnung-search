@@ -4,7 +4,11 @@
 import json
 import logging
 import os
+import re
 import sys
+import threading
+import time
+from datetime import datetime
 from pathlib import Path
 
 VERSION = "0.1.0"
@@ -46,14 +50,32 @@ DEFAULTS = {
 log = logging.getLogger("wohnung")
 
 
+_save_lock = threading.Lock()   # config.json пишут окно и бот (поток asyncio)
+config_backup: Path | None = None   # копия повреждённого config.json, сделанная последним load_config()
+
+
+def _backup_corrupt(text: str) -> Path:
+    path = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.bad-{datetime.now():%Y%m%d-%H%M%S}")
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def load_config() -> dict:
-    """Читает config.json; вложенные словари (filters, platforms.*) дополняет недостающими ключами."""
+    """Читает config.json; вложенные словари (filters, platforms.*) дополняет недостающими ключами.
+    Повреждённый файл копируется в config.json.bad-<время> (секреты остаются там), берутся значения по
+    умолчанию, но владелец бота (owner_chat_id) достаётся из текста: иначе бота займёт первый написавший."""
+    global config_backup
+    config_backup = None
     data = {}
     if CONFIG_FILE.exists():
+        text = CONFIG_FILE.read_text(encoding="utf-8")
         try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            data = json.loads(text)
         except json.JSONDecodeError as e:
-            log.error("config.json повреждён (%s) — взяты значения по умолчанию", e)
+            config_backup = _backup_corrupt(text)
+            log.error("config.json повреждён (%s) — взяты значения по умолчанию, копия: %s", e, config_backup)
+            m = re.search(r'"owner_chat_id"\s*:\s*(-?\d+)', text)
+            data = {"owner_chat_id": int(m.group(1))} if m else {}
     cfg = json.loads(json.dumps(DEFAULTS))   # глубокая копия
     for k, v in data.items():
         if k == "filters" and isinstance(v, dict):
@@ -68,7 +90,19 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict):
-    CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Атомарно: временный файл и os.replace — оборванная запись не портит config.json."""
+    text = json.dumps(cfg, ensure_ascii=False, indent=2)   # до записи: сбой сериализации файл не трогает
+    with _save_lock:
+        tmp = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        for attempt in range(3):
+            try:
+                os.replace(tmp, CONFIG_FILE)
+                return
+            except PermissionError:   # Windows: файл на миг открыт другим (антивирус, редактор)
+                if attempt == 2:
+                    raise
+                time.sleep(0.1)
 
 
 def prompt_path(cfg) -> Path:
