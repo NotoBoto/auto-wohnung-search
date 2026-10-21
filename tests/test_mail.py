@@ -198,3 +198,31 @@ def test_parse_exception_yields_minimal_reply(monkeypatch):
     got = watcher(FakeImap({1: raw("kleinanzeigen_reply.eml"), 2: raw("other.eml")}), state).fetch_new()
     assert len(got) == 1 and got[0].platform == "kleinanzeigen" and got[0].link == INBOX["kleinanzeigen"]
     assert got[0].excerpt.startswith("Sie haben eine neue Nachricht") and state["last_uid"] == 2
+
+
+def test_persistently_failing_uid_skipped_on_third_poll():
+    fake = FlakyImap({1: raw("kleinanzeigen_reply.eml"), 2: raw("wggesucht_reply.eml"), 3: raw("immoscout_reply.eml")}, 2, "raise")
+    state = {"last_uid": 0}
+    w = watcher(fake, state)
+    assert [r.platform for r in w.fetch_new()] == ["kleinanzeigen"] and state["last_uid"] == 1
+    assert w.fetch_new() == [] and state["last_uid"] == 1 and state["fail_count"] == 2
+    assert [r.platform for r in w.fetch_new()] == ["immoscout"] and state["last_uid"] == 3
+    assert "fail_uid" not in state and "fail_count" not in state
+
+
+def test_uid_failing_once_then_ok_is_delivered_and_counter_reset():
+    fake = FlakyImap({1: raw("wggesucht_reply.eml")}, 1, "no")
+    state = {"last_uid": 0}
+    assert watcher(fake, state).fetch_new() == [] and state["fail_count"] == 1
+    fake.fail_uid = None
+    assert [r.platform for r in watcher(fake, state).fetch_new()] == ["wggesucht"]
+    assert state["last_uid"] == 1 and "fail_count" not in state
+
+
+def test_unexpected_error_in_message_body_is_treated_as_fetch_failure(monkeypatch):
+    def boom(m): raise RuntimeError("x")
+    monkeypatch.setattr(mail, "parse_notification", boom)
+    monkeypatch.setattr(mail, "_fallback", boom)
+    state = {"last_uid": 0}
+    assert watcher(FakeImap({1: raw("kleinanzeigen_reply.eml")}), state).fetch_new() == []
+    assert state["last_uid"] == 0 and state["fail_uid"] == 1

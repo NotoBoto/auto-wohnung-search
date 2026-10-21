@@ -15,6 +15,7 @@ HOST, PORT = "imap.gmail.com", 993
 SENDERS = {"kleinanzeigen.de": "kleinanzeigen", "wg-gesucht.de": "wggesucht",
            "immowelt.de": "immowelt", "immobilienscout24.de": "immoscout"}
 MAX_EXCERPT = 500
+MAX_FAILS = 3   # столько опросов подряд письмо может не читаться, потом пропускаем
 NO_TEXT = "(текст ответа не найден в письме)"
 # страницы сообщений площадок для случая, когда в письме нет ссылки на диалог (адреса — лучшая догадка, вживую не проверены)
 INBOX = {"kleinanzeigen": "https://www.kleinanzeigen.de/m-nachrichten.html",
@@ -201,23 +202,35 @@ class MailWatcher:
             last = int(last)
             out = []
             for uid in sorted(u for u in self._uids(imap, f"UID {last + 1}:*") if u > last):
+                r, ok = None, False
                 try:
                     typ, data = imap.uid("FETCH", str(uid), "(BODY.PEEK[])")
-                except Exception:   # обрыв связи: уже разобранное отдаём, это письмо заберём в следующий раз
+                    raw = next((d[1] for d in data or [] if isinstance(d, tuple)), None) if typ == "OK" else None
+                    if raw:
+                        msg = email.message_from_bytes(raw)
+                        try:
+                            r = parse_notification(msg)
+                        except Exception:
+                            log.exception("mail: письмо uid=%s не разобрано", uid)
+                            r = _fallback(msg)
+                        ok = True
+                    else:
+                        log.warning("mail: письмо uid=%s не получено", uid)
+                except Exception:   # обрыв связи и т.п.: уже разобранное отдаём, это письмо заберём в следующий раз
                     log.exception("mail: сбой при чтении письма uid=%s", uid)
-                    break
-                raw = next((d[1] for d in data or [] if isinstance(d, tuple)), None) if typ == "OK" else None
-                if not raw:
-                    log.warning("mail: письмо uid=%s не получено, повтор в следующий раз", uid)
-                    break
-                msg = email.message_from_bytes(raw)
-                try:
-                    r = parse_notification(msg)
-                except Exception:
-                    log.exception("mail: письмо uid=%s не разобрано", uid)
-                    r = _fallback(msg)
-                if r:
-                    out.append(r)
+                if ok:
+                    self.state.pop("fail_uid", None)
+                    self.state.pop("fail_count", None)
+                    if r:
+                        out.append(r)
+                else:
+                    n = self.state.get("fail_count", 0) + 1 if self.state.get("fail_uid") == uid else 1
+                    if n < MAX_FAILS:
+                        self.state["fail_uid"], self.state["fail_count"] = uid, n
+                        break
+                    log.warning("mail: письмо uid=%s не читается %d раза подряд, пропущено", uid, n)
+                    self.state.pop("fail_uid", None)
+                    self.state.pop("fail_count", None)
                 self.state["last_uid"] = last = uid
             return out
         finally:
