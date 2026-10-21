@@ -1,0 +1,11 @@
+customtkinter>=5.2
+pystray>=0.19
+pillow>=10.0
+anthropic>=1.11
+google-genai>=1.0
+openai>=1.66
+playwright>=1.48
+python-telegram-bot>=21.6,<22
+openpyxl>=3.1
+pytest
+pytest-asyncio

@@ -13,3 +13,5 @@ browser_profiles/
 logs/
 .env
 .superpowers/
+log.txt
+_post_media/
