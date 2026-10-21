@@ -48,6 +48,10 @@ class NotSubmittedError(RuntimeError):
     """Сбой отправки ДО нажатия «Отправить» (форма/кнопка не найдена, окно входа): письмо точно не ушло."""
 
 
+class AlreadyContactedError(RuntimeError):
+    """С арендодателем уже есть переписка: новое письмо не пишем, объявление считается отправленным."""
+
+
 class MissingFieldError(RuntimeError):
     """Форма требует поле, которого нет в профиле."""
     def __init__(self, field: str):

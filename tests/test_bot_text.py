@@ -106,3 +106,40 @@ def test_parse_profile_answer_number_formats():
     assert parse_profile_answer("net_income", "3.200 €") == 3200
     with pytest.raises(ValueError):
         parse_profile_answer("persons", "2,5")
+
+
+# --- ссылка на карту ---
+
+def test_map_line_exact_address():
+    import dataclasses
+    from bot_text import map_line
+    r = dataclasses.replace(ROW, street="Musterstraße 12", postcode="53111", district="Altstadt")
+    line = map_line(r)
+    assert line.startswith("📍 Musterstraße 12, 53111 Bonn (Altstadt)")
+    assert "https://maps.google.com/?q=Musterstra%C3%9Fe+12%2C+53111+Bonn" in line and "примерно" not in line
+
+
+def test_map_line_street_without_number_is_approximate():
+    import dataclasses
+    from bot_text import map_line
+    line = map_line(dataclasses.replace(ROW, street="Kaiserstraße", postcode="53113"))
+    assert "Kaiserstraße, 53113 Bonn" in line and "примерно" in line
+
+
+def test_map_line_only_district():
+    import dataclasses
+    from bot_text import map_line
+    line = map_line(dataclasses.replace(ROW, district="Bonn-Beuel"))
+    assert "Bonn-Beuel" in line and "примерно" in line
+
+
+def test_map_line_none_without_address():
+    from bot_text import map_line
+    assert map_line(ROW) is None
+
+
+def test_draft_and_reply_show_map():
+    import dataclasses
+    r = dataclasses.replace(ROW, street="Musterstraße 12", postcode="53111")
+    assert "📍" in format_draft(r, "Text", False) and "📍" in format_reply(r, REPLY)
+    assert "📍" not in format_draft(ROW, "Text", False)

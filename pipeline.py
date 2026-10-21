@@ -17,8 +17,8 @@ from browser import human_pause
 from filters import check, estimate_warm, prefilter
 from letter import LetterError, generate_letter
 from models import Listing, profile_complete
-from sources.base import (TZ, BlockedError, MissingFieldError, NotSubmittedError, RateLimiter, SourceBroken,
-                          poll_interval)
+from sources.base import (TZ, AlreadyContactedError, BlockedError, MissingFieldError, NotSubmittedError,
+                          RateLimiter, SourceBroken, poll_interval)
 from store import Row, Store, contact_key
 
 log = logging.getLogger("wohnung")
@@ -41,6 +41,7 @@ class Notifier(Protocol):
     async def draft(self, row: Row, text: str, warm_estimated: bool) -> int: ...   # message_id
     async def ask_duplicate(self, row: Row, match: Row) -> None: ...
     async def ask_stuck(self, row: Row) -> None: ...
+    async def sent(self, row: Row) -> None: ...   # черновик (если был) сворачивается в строку «✓ Отправлено»
     async def reply(self, row: Row | None, r) -> None: ...   # None — «не нашёл, к какому объявлению»
     async def incident(self, platform: str, kind: str, detail: str) -> None: ...
     async def missing_profile(self) -> None: ...
@@ -295,6 +296,11 @@ class Engine:
             try:
                 page = await self.browser.page(platform)
                 await src.send(page, l, row.letter, self.cfg["profile"])
+            except AlreadyContactedError as e:
+                # переписка с арендодателем уже есть — второе письмо не пишем, считаем отправленным
+                self.store.set_status(id, "sent", sent_at=self.clock(), reason="переписка уже была")
+                log.info("%s: #%s — %s", platform, id, e)
+                await self._safe(self.notifier.sent(self.store.get(id)))
             except BlockedError as e:
                 self.store.set_status(id, "queued")
                 await self._block(platform, e.kind, str(e))
@@ -311,12 +317,13 @@ class Engine:
                 if not self._paused_now(platform):
                     self._stuck_paused.add(platform)
                 self.pause(platform)
-                await self._incident(platform, "send", str(e))
+                self.store.open_incident(platform, "send")   # без отдельного сообщения: хватит вопроса «дошло ли?»
                 await self._ask_stuck(self.store.get(id))
             else:
                 self.store.set_status(id, "sent", sent_at=self.clock())   # до снятия блокировки площадки
                 self.store.close_incidents(platform, "send")
                 log.info("%s: письмо #%s отправлено", platform, id)
+                await self._safe(self.notifier.sent(self.store.get(id)))
 
     def _sendable(self, row: Row) -> bool:
         return (row.status == "queued" and row.reason != GENERATING and bool(row.letter)
@@ -391,6 +398,7 @@ class Engine:
         self._asked_stuck.discard(id)   # новый неясный сбой этой строки — снова вопрос
         if was_sent:
             self.store.set_status(id, "sent", sent_at=self.clock())
+            await self._safe(self.notifier.sent(self.store.get(id)))
         else:
             self.store.set_status(id, "queued")
         # пауза из-за неясной отправки снимается, когда владелец ответил по всем зависшим строкам площадки

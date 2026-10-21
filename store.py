@@ -19,6 +19,7 @@ class Row:
     id: int; platform: str; ext_id: str; url: str; title: str; status: str
     letter: str; warm: float | None; contact_key: str; created_at: datetime; sent_at: datetime | None
     reason: str; draft_msg_id: int | None
+    street: str = ""; postcode: str = ""; district: str = ""   # для ссылки на карту
 
 
 @dataclass
@@ -75,7 +76,7 @@ CREATE TABLE IF NOT EXISTS listings (
     created_at TEXT NOT NULL, sent_at TEXT, reason TEXT NOT NULL DEFAULT '', draft_msg_id INTEGER,
     addr_key TEXT NOT NULL DEFAULT '', has_street INTEGER NOT NULL DEFAULT 0,
     postcode TEXT NOT NULL DEFAULT '', district TEXT NOT NULL DEFAULT '',
-    rooms REAL, area REAL, UNIQUE (platform, ext_id));
+    rooms REAL, area REAL, street TEXT NOT NULL DEFAULT '', UNIQUE (platform, ext_id));
 CREATE TABLE IF NOT EXISTS replies (
     id INTEGER PRIMARY KEY AUTOINCREMENT, listing_id INTEGER NOT NULL,
     excerpt TEXT NOT NULL DEFAULT '', link TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL);
@@ -94,6 +95,10 @@ class Store:
         self._clock = clock
         with self._lock:
             self._db.executescript(_SCHEMA)
+            # база из прошлой версии: колонки street ещё нет
+            cols = {r["name"] for r in self._db.execute("PRAGMA table_info(listings)")}
+            if "street" not in cols:
+                self._db.execute("ALTER TABLE listings ADD COLUMN street TEXT NOT NULL DEFAULT ''")
             self._db.commit()
 
     def _write(self, sql: str, args=()) -> sqlite3.Cursor:
@@ -106,16 +111,16 @@ class Store:
     def _row(r: sqlite3.Row) -> Row:
         return Row(r["id"], r["platform"], r["ext_id"], r["url"], r["title"], r["status"], r["letter"],
                    r["warm"], r["contact_key"], _dt(r["created_at"]), _dt(r["sent_at"]),
-                   r["reason"], r["draft_msg_id"])
+                   r["reason"], r["draft_msg_id"], r["street"], r["postcode"], r["district"])
 
     def add(self, l: Listing, warm: float | None) -> int:
         key = addr_key(l)
         with self._lock:
             cur = self._db.execute(
                 "INSERT OR IGNORE INTO listings (platform, ext_id, url, title, warm, contact_key, created_at,"
-                " addr_key, has_street, postcode, district, rooms, area) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " addr_key, has_street, postcode, district, rooms, area, street) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (l.platform, l.ext_id, l.url, l.title, warm, contact_key(l.contact_name), _ts(self._clock()),
-                 key, int(not key.startswith("|")), l.postcode, l.district, l.rooms, l.area))
+                 key, int(not key.startswith("|")), l.postcode, l.district, l.rooms, l.area, l.street or ""))
             self._db.commit()
             if cur.rowcount:
                 return cur.lastrowid

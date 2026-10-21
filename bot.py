@@ -12,7 +12,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from telegram.request import HTTPXRequest
 
 import core
-from bot_text import (PROFILE_STEPS, format_digest, format_draft, format_incident, format_profile, format_reply,
+from bot_text import (PROFILE_STEPS, format_digest, format_done, format_draft, format_incident, format_profile, format_reply,
                       format_status, parse_filters_args, parse_profile_answer)
 from models import PROFILE_FIELDS, profile_complete
 from store import Row, Store
@@ -86,6 +86,8 @@ class TelegramNotifier:
             except RetryAfter as e:
                 pause = float(getattr(e, "retry_after", 1)) + 1
             except BadRequest as e:     # подкласс NetworkError, но повтор не поможет (сообщение удалено и т.п.)
+                if "not modified" in str(e).lower():   # текст уже такой — не ошибка
+                    return None
                 log.warning("Telegram: %s", _scrub(str(e), self.cfg.get("bot_token", "")))
                 return None
             except NetworkError as e:   # включает TimedOut
@@ -114,6 +116,8 @@ class TelegramNotifier:
     # ---------- Notifier ----------
 
     async def draft(self, row: Row, text: str, warm_estimated: bool) -> int:
+        if row.draft_msg_id:   # новый вариант заменяет старый черновик, а не копится в чате
+            await self._delete(row.draft_msg_id)
         kb = _kb([("Отправить", f"send:{row.id}"), ("Изменить", f"edit:{row.id}")],
                  [("Другой вариант", f"regen:{row.id}"), ("Пропустить", f"skip:{row.id}")])
         return await self._send(format_draft(row, text, warm_estimated), kb)
@@ -124,9 +128,24 @@ class TelegramNotifier:
         self._push(text, _kb([("Всё равно отправить", f"dup:{row.id}:send"), ("Пропустить", f"dup:{row.id}:skip")]))
 
     async def ask_stuck(self, row: Row) -> None:
-        text = (f"Письмо #{row.id} ({row.platform}) прервалось при отправке, не ясно, ушло ли оно.\n"
-                f"{row.title}\n{row.url}\nПроверьте отправленные на сайте.")
+        text = f"Не понял, ушло ли письмо. Проверьте отправленные на сайте.\n{format_done(row, '?')}"
         self._push(text, _kb([("Дошло", f"stuck:{row.id}:sent"), ("Не дошло, отправить снова", f"stuck:{row.id}:resend")]))
+
+    async def sent(self, row: Row) -> None:
+        if row.draft_msg_id:   # авто-режим без черновика — без отдельного сообщения, хватит сводки
+            mark = "✓ Отправлено" + (" (переписка уже была)" if "переписка" in (row.reason or "") else "")
+            self._enqueue(lambda: self._edit(row.draft_msg_id, format_done(row, mark)))
+
+    async def _edit(self, message_id: int, text: str) -> None:
+        chat = self.cfg.get("owner_chat_id", 0)
+        if chat:
+            await self._retry(lambda: self.bot.edit_message_text(
+                chat_id=chat, message_id=message_id, text=text[:MAX_LEN], reply_markup=None))
+
+    async def _delete(self, message_id: int) -> None:
+        chat = self.cfg.get("owner_chat_id", 0)
+        if chat:
+            await self._retry(lambda: self.bot.delete_message(chat_id=chat, message_id=message_id))
 
     async def reply(self, row: Row | None, r) -> None:
         self._push(format_reply(row, r))
@@ -143,8 +162,7 @@ class TelegramNotifier:
     async def remove_draft(self, row: Row) -> None:
         if not row.draft_msg_id:
             return
-        chat = self.cfg.get("owner_chat_id", 0)
-        self._enqueue(lambda: self._retry(lambda: self.bot.delete_message(chat_id=chat, message_id=row.draft_msg_id)))
+        self._enqueue(lambda: self._delete(row.draft_msg_id))
 
 
 class OwnerBot:
@@ -152,8 +170,10 @@ class OwnerBot:
 
     def __init__(self, cfg: dict, engine, store: Store):
         self.cfg, self.engine, self.store = cfg, engine, store
-        self.pending_edit: dict[int, tuple[int, object]] = {}  # chat → (id черновика, его сообщение с кнопками)
+        # chat → (id черновика, его сообщение с кнопками, подсказка «пришлите текст»)
+        self.pending_edit: dict[int, tuple[int, object, object]] = {}
         self.wizard: dict[int, list[str]] = {}                # chat → оставшиеся поля профиля
+        self._tasks: set[asyncio.Task] = set()                # фоновые отправки (печать письма идёт минуту-две)
 
     # ---------- общее ----------
 
@@ -163,22 +183,39 @@ class OwnerBot:
         return chat is not None and bool(owner) and chat.id == owner
 
     @staticmethod
-    async def _say(update: Update, text: str) -> None:
-        await update.effective_message.reply_text(text[:MAX_LEN])
+    async def _say(update: Update, text: str):
+        return await update.effective_message.reply_text(text[:MAX_LEN])
+
+    @staticmethod
+    async def _delete(message) -> None:
+        """Служебные сообщения (подсказка, ответ владельца) убираются, чтобы не засорять чат."""
+        if message is None:
+            return
+        try:
+            await message.delete()
+        except Exception as e:   # нет прав, уже удалено — не важно
+            log.debug("не удалось удалить сообщение: %s", type(e).__name__)
 
     def _save(self) -> None:
         core.save_config(self.cfg)
 
-    def _cancel_input(self, chat: int) -> None:
-        self.pending_edit.pop(chat, None)
+    def _cancel_input(self, chat: int):
+        """Сбрасывает ввод; возвращает подсказку правки, которую стоит удалить."""
         self.wizard.pop(chat, None)
+        pending = self.pending_edit.pop(chat, None)
+        return pending[2] if pending else None
 
-    async def _close_keyboard(self, message, outcome: str) -> None:
-        """Убирает кнопки у сообщения и дописывает итог; если текст не меняется, хотя бы убирает кнопки."""
+    async def _collapse(self, message, id: int, outcome: str) -> None:
+        """Сворачивает сообщение в строку-итог без кнопок; не вышло — хотя бы убирает кнопки."""
         if message is None:
             return
         try:
-            await message.edit_text(f"{message.text or ''}\n\n{outcome}"[:MAX_LEN], reply_markup=None)
+            row = self.store.get(id)
+        except Exception:
+            row = None
+        text = format_done(row, outcome) if row else outcome
+        try:
+            await message.edit_text(text[:MAX_LEN], reply_markup=None)
         except TelegramError as e:
             log.warning("не удалось обновить сообщение: %s", _scrub(str(e), self.cfg.get("bot_token", "")))
             try:
@@ -224,8 +261,8 @@ class OwnerBot:
 
     async def cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if self._is_owner(update):
-            self._cancel_input(update.effective_chat.id)
-            await self._say(update, "Отменено.")
+            await self._delete(self._cancel_input(update.effective_chat.id))
+            await self._delete(update.effective_message)
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._pause_resume(update, context, True)
@@ -365,17 +402,16 @@ class OwnerBot:
             return
         chat, text = update.effective_chat.id, (update.effective_message.text or "").strip()
         if chat in self.pending_edit:
-            id, draft_msg = self.pending_edit.pop(chat)
+            id, draft_msg, prompt_msg = self.pending_edit.pop(chat)
+            await self._delete(prompt_msg)
+            await self._delete(update.effective_message)
             try:
                 if text.startswith("!"):
+                    # старый черновик удалится, когда придёт новый
+                    await self._collapse(draft_msg, id, "↻ Готовлю новый вариант…")
                     await self.engine.regenerate(id, text[1:].strip())
-                    await self._say(update, "Готовлю новый вариант.")
-                    await self._close_keyboard(draft_msg, "↻ Готовлю новый вариант")
                 else:
-                    await self.engine.approve(id, text)
-                    outcome = self._approve_outcome(id)
-                    await self._say(update, outcome)
-                    await self._close_keyboard(draft_msg, outcome)
+                    await self._approve(id, text, draft_msg)
             except Exception as e:
                 log.exception("правка черновика #%s", id)
                 await self._say(update, f"Ошибка: {type(e).__name__}")
@@ -386,10 +422,35 @@ class OwnerBot:
 
     # ---------- кнопки ----------
 
+    async def _approve(self, id: int, text: str | None, message) -> None:
+        """Сразу показывает «Отправляю…», а саму отправку ведёт в фоне: бот не молчит минуту, пока печатается письмо."""
+        if self.store.get(id).status != "draft":
+            await self._collapse(message, id, self._approve_outcome(id))
+            return
+        await self._collapse(message, id, "⏳ Отправляю…")
+        task = asyncio.get_running_loop().create_task(self._finish_approve(id, text, message))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _finish_approve(self, id: int, text: str | None, message) -> None:
+        try:
+            await self.engine.approve(id, text)
+        except Exception as e:
+            log.exception("отправка #%s", id)
+            await self._collapse(message, id, f"Ошибка отправки: {type(e).__name__}, см. журнал")
+            return
+        await self._collapse(message, id, self._approve_outcome(id))
+
+    async def drain(self) -> None:
+        """Дождаться фоновых отправок (тесты, остановка)."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
     def _approve_outcome(self, id: int) -> str:
         status = self.store.get(id).status
-        return {"sent": "✓ Отправлено", "queued": "✓ В очереди на отправку",
-                "sending": "✓ Отправляется"}.get(status, f"Не отправлено (статус: {status})")
+        return {"sent": "✓ Отправлено", "queued": "⏳ В очереди на отправку (лимит или пауза)",
+                "sending": "? Не ясно, ушло ли — см. вопрос ниже",
+                "draft": "✎ Нужна правка — см. новый черновик"}.get(status, f"Не отправлено (статус: {status})")
 
     def _dup_outcome(self, id: int) -> str:
         status = self.store.get(id).status
@@ -415,27 +476,28 @@ class OwnerBot:
             log.exception("кнопка %s", parts[0])
             await self._say(update, f"Ошибка: {type(e).__name__}")
             return
-        if outcome is not None:   # сообщение теряет кнопки, чтобы их нельзя было нажать дважды
-            await self._close_keyboard(q.message, outcome)
+        if outcome is not None:   # сообщение сворачивается и теряет кнопки, чтобы их нельзя было нажать дважды
+            await self._collapse(q.message, id, outcome)
 
     async def _dispatch(self, update: Update, kind: str, id: int, arg: str) -> str | None:
         """Выполняет действие кнопки; возвращает итог для сообщения или None (кнопки остаются)."""
         e = self.engine
         if kind == "send":
-            await e.approve(id)
-            return self._approve_outcome(id)
+            await self._approve(id, None, update.callback_query.message)
+            return None
         if kind == "edit":
             if self.store.get(id).status != "draft":
                 return "Уже обработано"
             chat = update.effective_chat.id
-            self.wizard.pop(chat, None)
-            self.pending_edit[chat] = (id, update.callback_query.message)
-            await self._say(update, "Пришлите новый текст сообщением. Если начать с «!», это пожелание для нового "
-                                    "варианта («!короче»). /cancel — отмена.")
+            await self._delete(self._cancel_input(chat))   # повторное «Изменить» — старая подсказка не нужна
+            prompt = await self._say(update, "Пришлите новый текст сообщением. Если начать с «!», это пожелание "
+                                             "для нового варианта («!короче»). /cancel — отмена.")
+            self.pending_edit[chat] = (id, update.callback_query.message, prompt)
             return None
         if kind == "regen":
+            await self._collapse(update.callback_query.message, id, "↻ Готовлю новый вариант…")
             await e.regenerate(id)
-            return "↻ Готовлю новый вариант"
+            return None
         if kind == "skip":
             await e.skip(id)
             return self._skip_outcome(id)

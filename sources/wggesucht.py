@@ -5,7 +5,8 @@ from datetime import datetime
 
 from browser import human_pause, human_type
 from models import Listing, parse_area, parse_money, parse_rooms
-from sources.base import BlockedError, MissingFieldError, NotSubmittedError, Source, SourceBroken, listing_flags
+from sources.base import (AlreadyContactedError, BlockedError, MissingFieldError, NotSubmittedError, Source,
+                          SourceBroken, listing_flags)
 
 log = logging.getLogger(__name__)
 
@@ -16,8 +17,10 @@ _CARD_RE = re.compile(r'(<a\b[^>]*\bclass="wgg-list-card offer_list_item[^"]*"[^
 _TAG_RE = re.compile(r"<[^>]+>")
 _DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
 _EMPTY_RE = re.compile(r"keine\s+(?:Anzeigen|Angebote|Ergebnisse|Treffer)\s+gefunden", re.I)   # маркер пустой выдачи: не проверено вживую
-_BLOCK_RE = re.compile(r"captcha|Zugriff verweigert|Access Denied|not a robot|Just a moment|cf-chl|"
+# (?<!re)captcha: невидимая reCAPTCHA (google.com/recaptcha, recaptcha.net) есть на обычных страницах сайта
+_BLOCK_RE = re.compile(r"(?<!re)captcha|Zugriff verweigert|Access Denied|not a robot|Just a moment|cf-chl|"
                        r"Checking your browser", re.I)
+_CONV_URL_RE = re.compile(r"nachricht\.html\?nachrichten-id=\d+")
 _HARMLESS_RE = re.compile(r'data-input="captcha"', re.I)   # поле формы входа/регистрации — не проверка
 # только признаки конкретных страниц (выдача, объявление, форма сообщения): main_column есть на любой странице сайта
 _NORMAL_MARKERS = ("offer_list_item", "detailed-view-title", 'id="message_input"')
@@ -219,25 +222,38 @@ class WgGesucht(Source):
             return False
         return await page.locator("#login_form").count() == 0
 
-    # не проверено вживую — проверить после входа пользователя
+    @staticmethod
+    def is_conversation(url: str, html: str) -> bool:
+        """Страница переписки: после отправки (и при повторном открытии формы) сайт ведёт сюда (проверено вживую)."""
+        return "nachrichten-id=" in url or "Unterhaltung mit" in html
+
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
         try:
             await self._fill_form(page, l, text)
-        except (BlockedError, MissingFieldError, NotSubmittedError):
+        except (AlreadyContactedError, BlockedError, MissingFieldError, NotSubmittedError):
             raise
         except Exception as e:   # до нажатия «Отправить» письмо точно не ушло
             raise NotSubmittedError(f"wggesucht: форма не заполнена: {e}") from e
+        # кнопка отправки не проверена вживую; успех — переход в переписку nachricht.html?nachrichten-id=…
         await page.locator("button:has-text('Nachricht senden'), button[type='submit']:has-text('Senden')").last.click()
-        ok = page.get_by_text(re.compile(r"Nachricht (wurde )?(erfolgreich )?(gesendet|verschickt)|erfolgreich (gesendet|verschickt)", re.I))
         try:
-            await ok.first.wait_for(timeout=15000)
-        except Exception as e:   # после нажатия исход неизвестен — не SourceBroken/NotSubmittedError
+            await page.wait_for_url(_CONV_URL_RE, timeout=20000)
+        except Exception as e:
+            try:
+                if self.is_conversation(page.url, await page.content()):
+                    return
+            except Exception:
+                pass
+            # после нажатия исход неизвестен — не SourceBroken/NotSubmittedError
             raise RuntimeError("wggesucht: подтверждение отправки не найдено") from e
 
     async def _fill_form(self, page, l: Listing, text: str) -> None:
         """Всё до нажатия «Отправить»."""
         # форма сообщения — отдельная страница /nachricht-senden/<slug>.<id>.html
-        await self._open(page, l.url.replace(f"{BASE}/", f"{BASE}/nachricht-senden/", 1))
+        html = await self._open(page, l.url.replace(f"{BASE}/", f"{BASE}/nachricht-senden/", 1))
+        if self.is_conversation(page.url, html):
+            # переписка уже есть: в поле чата не печатаем, иначе ушло бы второе письмо
+            raise AlreadyContactedError("wggesucht: переписка с арендодателем уже есть")
         msg = page.locator("textarea#message_input, textarea[name='content'], textarea").first
         try:
             await msg.wait_for(state="visible", timeout=8000)
