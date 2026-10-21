@@ -129,8 +129,19 @@ def test_contact_cap_counts_7_days(store):
     for i, days in enumerate((0, 3, 6, 8)):
         rid = store.add(L(ext_id=str(i), street=f"S {i}", contact_name="Herr Müller GmbH"), 800)
         store.set_status(rid, "sent", sent_at=NOW - timedelta(days=days))
-    assert store.contact_sent_count(contact_key("Müller")) == 3
-    assert store.contact_sent_count("") == 0
+    assert store.contact_count(contact_key("Müller")) == 3
+    assert store.contact_count("") == 0
+
+
+def test_contact_count_includes_pending_rows(store):
+    for i, st in enumerate(("sent", "sending", "queued", "draft", "skipped", "failed", "ask_dup")):
+        rid = store.add(L(ext_id=str(i), street=f"S {i}", contact_name="Frau Weber"), 800)
+        store.set_status(rid, st)
+    old = store.add(L(ext_id="old", street="Alt 1", contact_name="Frau Weber"), 800)
+    store.set_status(old, "sent", sent_at=NOW - timedelta(days=8))
+    assert store.contact_count(contact_key("Weber")) == 4
+    assert store.contact_count(contact_key("Weber"), statuses=("sent", "sending"), exclude_id=1) == 1
+    assert store.contact_count("") == 0
 
 
 def test_sent_count_and_last_sent_at(store):

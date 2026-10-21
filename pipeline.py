@@ -193,7 +193,8 @@ class Engine:
                 self.store.set_meta("missing_profile_at", now.isoformat())
                 await self._safe(self.notifier.missing_profile())
             return "seen"
-        if self.store.contact_sent_count(contact_key(l.contact_name), 7) >= self.cfg["contact_cap_7d"]:
+        # считаем и ждущие письма (очередь, черновик): иначе одна выдача ставит в очередь пять писем одному контакту
+        if self.store.contact_count(contact_key(l.contact_name), 7) >= self.cfg["contact_cap_7d"]:
             self.store.set_status(id, "filtered", reason="лимит контакта")
             return "filtered"
         self.store.set_status(id, "queued", reason=GENERATING)   # резерв: блокирует дубль на другой площадке
@@ -250,6 +251,10 @@ class Engine:
                 return
             wait = self._limiter(platform).wait_seconds(self.clock())
             if wait is None or wait > 0:
+                return
+            if self.store.contact_count(row.contact_key, 7, ("sent", "sending"), exclude_id=id) >= self.cfg["contact_cap_7d"]:
+                self.store.set_status(id, "filtered", reason="лимит контакта")
+                log.info("%s: #%s не отправлено — лимит писем контакту", platform, id)
                 return
             src = self.sources[platform]
             self.store.set_status(id, "sending")

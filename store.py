@@ -183,12 +183,17 @@ class Store:
                              (platform,)).fetchone()
         return _dt(r[0])
 
-    def contact_sent_count(self, contact_key: str, days: int = 7) -> int:
+    def contact_count(self, contact_key: str, days: int = 7, statuses=("sent", "sending", "queued", "draft"),
+                      exclude_id: int | None = None) -> int:
+        """Письма контакту за days дней: отправленные и ещё ждущие (очередь, черновик, отправка)."""
         if not contact_key:
             return 0
         since = _ts(self._clock() - timedelta(days=days))
-        return self._db.execute("SELECT COUNT(*) FROM listings WHERE status='sent' AND contact_key=? AND sent_at>=?",
-                                (contact_key, since)).fetchone()[0]
+        marks = ",".join("?" * len(statuses))
+        return self._db.execute(
+            f"SELECT COUNT(*) FROM listings WHERE status IN ({marks}) AND contact_key=?"
+            " AND COALESCE(sent_at, created_at)>=? AND id!=?",
+            (*statuses, contact_key, since, -1 if exclude_id is None else exclude_id)).fetchone()[0]
 
     def recent_openings(self, n: int = 30) -> list[str]:
         rows = self._db.execute("SELECT letter FROM listings WHERE status='sent' AND letter!=''"

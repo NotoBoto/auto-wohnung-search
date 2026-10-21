@@ -633,6 +633,28 @@ async def test_contact_cap(eng):
     assert eng.store.get(4).reason == "лимит контакта" and eng.ai.calls == []
 
 
+async def test_contact_cap_counts_rows_queued_in_same_poll():
+    env = Env(mode="auto")
+    for i in range(5):
+        await env.engine.process("kleinanzeigen", L(ext_id=str(i), street=f"Gasse {i}", contact_name="Vonovia GmbH",
+                                                     area=50 + i * 10, warm_rent=600 + i * 50))
+    for _ in range(5):
+        await env.engine.send_queued_once()
+        env.clock.now += timedelta(minutes=3)
+    assert len(env.ai.calls) == 3 and len(env.ka.sent) == 3
+    assert [r.reason for r in env.store.by_status("filtered")] == ["лимит контакта"] * 2
+
+
+async def test_contact_cap_rechecked_at_send():
+    env = Env(mode="auto")
+    await env.engine.process("kleinanzeigen", L(contact_name="Frau Weber"))   # в очереди
+    for k in range(3):   # тем временем владелец сам отправил этому контакту (например, одобрил черновики)
+        sent_row(env, f"s{k}", f"Gasse {k}", T0 - timedelta(hours=k + 1), contact="Frau Weber")
+    await env.engine.send_queued_once()
+    row = env.store.get(1)
+    assert env.ka.sent == [] and (row.status, row.reason) == ("filtered", "лимит контакта")
+
+
 # ---------- обслуживание ----------
 
 async def test_draft_expires_after_12h(eng):
