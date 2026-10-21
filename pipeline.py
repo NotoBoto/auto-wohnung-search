@@ -203,6 +203,8 @@ class Engine:
             return known.status if known else self._mark_duplicate(l, warm, d.match_id)
         id = self.store.add(l, warm)
         self._listings[id] = l
+        if d.kind == "similar" and self._filtered(id, l):   # не спрашиваем про дубль того, что всё равно отсеется
+            return "filtered"
         if d.kind == "similar":
             self.store.set_status(id, "ask_dup", reason=f"похоже на #{d.match_id}")
             await self._safe(self.notifier.ask_duplicate(self.store.get(id), self.store.get(d.match_id)))
@@ -563,11 +565,19 @@ class Engine:
         if d.kind == "exact":
             self.store.set_status(id, "duplicate", reason=f"как #{d.match_id}")
             return "duplicate"
+        if d.kind == "similar" and self._filtered(id, l):
+            return "filtered"
         if d.kind == "similar":
             self.store.set_status(id, "ask_dup", reason=f"похоже на #{d.match_id}")
             await self._safe(self.notifier.ask_duplicate(self.store.get(id), self.store.get(d.match_id)))
             return "ask_dup"
         return await self._continue(id, l)
+
+    def _filtered(self, id: int, l: Listing) -> bool:
+        r = check(l, self.cfg["filters"], self.cfg["profile"])
+        if not r.ok:
+            self.store.set_status(id, "filtered", reason=r.reason)
+        return not r.ok
 
     def _poll_delay(self, platform: str) -> float:
         p = self.cfg["platforms"][platform]

@@ -241,6 +241,13 @@ async def test_similar_asks_once(eng):
     assert asks[0][2] == first.id
 
 
+async def test_similar_but_filtered_is_not_asked(eng):
+    assert await eng.engine.process("kleinanzeigen", L()) == "draft"
+    eng.wg.details["w1"] = L("wggesucht", "w1", street="Musterstraße 14", warm_rent=810, limited_months=6)
+    assert await eng.engine.process("wggesucht", L("wggesucht", "w1", street="", warm_rent=None)) == "filtered"
+    assert eng.notifier.names("ask_duplicate") == [] and eng.store.get(2).reason == "срок 6 мес."
+
+
 async def test_resolve_duplicate(eng):
     await eng.engine.process("kleinanzeigen", L())
     await eng.engine.process("wggesucht", L("wggesucht", "w1", street="Musterstraße 14"))

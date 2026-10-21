@@ -15,7 +15,7 @@ Anrede:
 
 Inhalt:
 - Alle Fakten über dich nur aus dem Profil. Fehlt eine Angabe, lass sie weg; erwähne nie Einkommen, Beruf, Haustiere o. Ä., wenn sie dort nicht stehen. Erfinde nichts.
-- Erwähne, dass alle Unterlagen bereitliegen und sofort geschickt werden können.
+- Unterlagen nur erwähnen, wenn das Profil sie unter "documents" aufführt: dann nenne sie und schreibe, dass sie bereitliegen und sofort geschickt werden können. Fehlt "documents", erwähne keine Unterlagen.
 - Bitte am Ende um einen Besichtigungstermin.
 - Länge: etwa 800 bis 1000 Zeichen.
 - Beachte den Wunsch und die verbotenen ersten Sätze aus der Nachricht, falls vorhanden.

@@ -176,3 +176,10 @@ async def test_length_wish_says_too_short():
     ai = FakeAI(["Hallo", GOOD_DE_800])
     await generate_letter(ai, "p", L(), PROFILE)
     assert "zu kurz (5 Zeichen)" in ai.calls[1][1] and "Entwurf" not in ai.calls[1][1]
+
+
+def test_example_prompt_mentions_documents_only_from_profile():
+    import core
+    text = (core.RES / "prompt.example.txt").read_text(encoding="utf-8")
+    line = next(s for s in text.splitlines() if "Unterlagen" in s)
+    assert "documents" in line   # документы — только если они есть в профиле, иначе это выдумка
