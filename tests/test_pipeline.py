@@ -897,6 +897,69 @@ async def test_platform_without_source_is_skipped():
     assert env.ka.searches == 1 and env.ka.filters is env.cfg["filters"]
 
 
+async def spin(n=50):
+    for _ in range(n):
+        await asyncio.sleep(0)
+
+
+async def run_briefly(env, steps=50):
+    task = asyncio.create_task(env.engine.run())
+    await spin(steps)
+    return task
+
+
+async def stop_run(env, task):
+    await env.engine.stop()
+    await asyncio.wait_for(task, 1)
+
+
+def selective_env(only):
+    env = Env(mode="auto")
+    env.engine = Engine(env.cfg, env.store, env.ai, {"kleinanzeigen": env.ka, "wggesucht": env.wg},
+                        env.browser, env.notifier, clock=env.clock, only=only)
+    return env
+
+
+async def test_selective_run_polls_and_sends_only_chosen_platform():
+    env = selective_env({"wggesucht"})
+    env.store.add(L(ext_id="q"), 800)
+    env.store.set_status(1, "queued", letter=letter(0))   # письмо Kleinanzeigen ждёт — его площадку не трогаем
+    task = await run_briefly(env)
+    await stop_run(env, task)
+    assert env.wg.searches == 1 and env.ka.searches == 0
+    assert env.ka.sent == [] and env.store.get(1).status == "queued"
+
+
+async def test_disabled_platform_sleeps_until_switched_on():
+    env = Env()
+    env.cfg["platforms"]["kleinanzeigen"]["enabled"] = False
+    task = await run_briefly(env)
+    assert env.ka.searches == 0 and env.wg.searches == 1
+    env.cfg["platforms"]["kleinanzeigen"]["enabled"] = True
+    env.engine.wake("kleinanzeigen")   # переключатель в окне: опрос сразу, без ожидания интервала
+    await spin()
+    await stop_run(env, task)
+    assert env.ka.searches == 1 and env.wg.searches == 1
+
+
+async def test_activate_adds_platform_to_selective_run():
+    env = selective_env({"wggesucht"})
+    env.cfg["platforms"]["kleinanzeigen"]["enabled"] = False   # по одной запускается и выключенная
+    task = await run_briefly(env)
+    env.engine.activate("kleinanzeigen")
+    await spin()
+    await stop_run(env, task)
+    assert env.ka.searches == 1 and env.engine.active("kleinanzeigen")
+
+
+async def test_switch_off_during_poll_stops_processing():
+    env = Env()
+    env.ka.listings = [L(ext_id="1"), L(ext_id="2", street="Gasse 2")]
+    env.cfg["platforms"]["kleinanzeigen"]["enabled"] = False
+    await env.engine._process_all("kleinanzeigen", env.ka.listings)
+    assert not env.store.has("kleinanzeigen", "1")
+
+
 async def test_successful_send_notifies_sent_once():
     env = Env(mode="auto")
     five_queued(env)
@@ -923,3 +986,55 @@ async def test_resolve_stuck_sent_notifies_sent():
     await env.engine.send_queued_once()
     await env.engine.resolve_stuck(1, was_sent=True)
     assert env.notifier.names("sent") == [("sent", 1)]
+
+
+# ---------- журнал ----------
+
+async def test_poll_logs_summary(caplog):
+    caplog.set_level("INFO", logger="wohnung")
+    env = Env()
+    env.ka.listings = [L(ext_id="1"), L(ext_id="2", street="Andere Str. 5", warm_rent=2000)]
+    await env.engine.poll_once("kleinanzeigen")
+    caplog.clear()
+    env.ka.listings.append(L(ext_id="3", street="Dritte Str. 7"))
+    await env.engine.poll_once("kleinanzeigen")
+    summary = [r.getMessage() for r in caplog.records if "опрос за" in r.getMessage()]
+    assert len(summary) == 1
+    assert "в выдаче 3: известные 2, draft 1" in summary[0]
+
+
+class SnapPage:
+    url = "https://kleinanzeigen/fail"
+
+    async def content(self):
+        return "<html>fail</html>"
+
+    async def screenshot(self, path, full_page):
+        open(path, "wb").write(b"png")
+
+
+async def test_unknown_send_error_saves_page_snapshot(tmp_path, caplog):
+    caplog.set_level("INFO", logger="wohnung")
+    env = Env(mode="auto")
+    env.engine.debug_dir = tmp_path
+
+    async def page(platform):
+        return SnapPage()
+    env.browser.page = page
+    env.ka.send_exc = RuntimeError("после нажатия")
+    await env.engine.process("kleinanzeigen", L())
+    await env.engine.send_queued_once()
+    names = sorted(p.suffix for p in tmp_path.iterdir())
+    assert names == [".html", ".png"]
+    assert any("https://kleinanzeigen/fail" in r.getMessage() for r in caplog.records)
+
+
+async def test_daily_cap_logged_once_per_day(caplog):
+    caplog.set_level("INFO", logger="wohnung")
+    env = Env(mode="auto")
+    env.cfg["platforms"]["kleinanzeigen"]["daily_cap"] = 0
+    await env.engine.process("kleinanzeigen", L())
+    for _ in range(3):
+        await env.engine.send_queued_once()
+        env.clock.now += timedelta(seconds=10)
+    assert sum("дневной лимит" in r.getMessage() for r in caplog.records) == 1

@@ -1,3 +1,4 @@
+import logging
 import re
 import sqlite3
 import threading
@@ -12,6 +13,10 @@ STATUSES = ("seen", "filtered", "duplicate", "ask_dup", "draft", "queued", "send
 BLOCKING = ("draft", "queued", "sending", "sent", "ask_dup")   # эти статусы блокируют повторное письмо
 _FIELDS = ("letter", "reason", "sent_at", "draft_msg_id")
 _TS = "%Y-%m-%dT%H:%M:%S.%f"   # фиксированная ширина: строки сравниваются как время
+# переходы в эти статусы — в журнал окна (INFO); остальные (отсев, дубли, служебные) — только в log.txt (DEBUG)
+_LOG_INFO = ("draft", "queued", "sent", "skipped", "failed", "ask_dup")
+
+log = logging.getLogger("wohnung")
 
 
 @dataclass
@@ -123,9 +128,15 @@ class Store:
                  key, int(not key.startswith("|")), l.postcode, l.district, l.rooms, l.area, l.street or ""))
             self._db.commit()
             if cur.rowcount:
+                log.debug("%s #%s новое: %s | тёплая %s | %s | %s", l.platform, cur.lastrowid, l.title,
+                          warm, " ".join(filter(None, (l.street, l.postcode, l.district))) or "адрес ?", l.url)
                 return cur.lastrowid
             return self._db.execute("SELECT id FROM listings WHERE platform=? AND ext_id=?",
                                     (l.platform, l.ext_id)).fetchone()["id"]
+
+    def has(self, platform: str, ext_id: str) -> bool:
+        return self._db.execute("SELECT 1 FROM listings WHERE platform=? AND ext_id=?",
+                                (platform, ext_id)).fetchone() is not None
 
     def get(self, id: int) -> Row:
         r = self._db.execute("SELECT * FROM listings WHERE id=?", (id,)).fetchone()
@@ -148,7 +159,13 @@ class Store:
         if status == "sent" and "sent_at" not in fields:   # время отправки фиксируем автоматически
             sets.append("sent_at=COALESCE(sent_at, ?)")
             args.append(_ts(self._clock()))
+        old = self._db.execute("SELECT platform, title, status, reason FROM listings WHERE id=?", (id,)).fetchone()
         self._write(f"UPDATE listings SET {', '.join(sets)} WHERE id=?", (*args, id))
+        reason = fields.get("reason")
+        if old and (old["status"] != status or (reason is not None and reason != old["reason"])):
+            level = logging.INFO if status in _LOG_INFO and reason != "generating" else logging.DEBUG
+            log.log(level, "%s #%s %s → %s%s | %s", old["platform"], id, old["status"], status,
+                    f" ({reason})" if reason else "", old["title"])
 
     def find_dedup(self, l: Listing, warm: float | None, days: int = 60) -> DedupResult:
         same = self._db.execute("SELECT id FROM listings WHERE platform=? AND ext_id=?",

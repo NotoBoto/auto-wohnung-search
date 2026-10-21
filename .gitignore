@@ -18,3 +18,5 @@ _post_media/
 _system_prompt.txt
 prompt.txt
 log.txt
+log.txt.*
+debug/

@@ -11,6 +11,7 @@ import asyncio
 import ctypes
 import json
 import logging
+import logging.handlers
 import os
 import queue
 import socket
@@ -62,6 +63,7 @@ DEFAULT_MODEL = "(по умолчанию)"
 # Площадки в окне: (ключ в cfg, название, класс источника или None — «скоро»; Engine такие пропускает)
 PLATFORM_ROWS = (("kleinanzeigen", "Kleinanzeigen", Kleinanzeigen), ("wggesucht", "WG-Gesucht", WgGesucht),
                  ("immowelt", "Immowelt", None), ("immoscout", "ImmoScout24", None))
+PLATFORM_NAMES = {k: n for k, n, _ in PLATFORM_ROWS}
 MAIL_HINT = ("Вход выполнен. Один раз включите в настройках аккаунта {name} e-mail-уведомления о новых "
              "сообщениях на адрес Gmail из этой программы — иначе ответы арендодателей не дойдут до бота.")
 STOP_WAIT = 40   # сколько ждём, пока циклы движка закончат текущую работу при остановке, сек
@@ -80,17 +82,40 @@ class QueueHandler(logging.Handler):
         self.q.put(record)
 
 
+# модель каждой нейросети в cfg — для строки настроек в журнале при запуске
+MODEL_KEYS = {"zai": "zai_model", "claude_code": "model", "api": "api_model", "gemini_cli": "gemini_model",
+              "gemini_api": "gemini_api_model", "codex": "codex_model", "openai_api": "openai_api_model",
+              "openai_compat": "compat_model"}
+
+
 def setup_logging() -> queue.Queue:
+    """log.txt — всё, включая DEBUG (каждое объявление и его судьба), 5 МБ × 3 файла;
+    вкладка «Журнал» — только INFO и выше."""
     q = queue.Queue()
     fmt = logging.Formatter("%(asctime)s  %(levelname)s  %(message)s")
-    file_h = logging.FileHandler(BASE / "log.txt", encoding="utf-8")
+    file_h = logging.handlers.RotatingFileHandler(BASE / "log.txt", maxBytes=5_000_000, backupCount=3,
+                                                  encoding="utf-8")
     file_h.setFormatter(fmt)
     gui_h = QueueHandler(q)
-    log.setLevel(logging.INFO)
+    gui_h.setLevel(logging.INFO)
+    log.setLevel(logging.DEBUG)
     log.addHandler(file_h)
     log.addHandler(gui_h)
     return q
 
+
+
+def log_settings(c: dict, mail_on: bool, names) -> None:
+    """Настройки запуска одной строкой на тему — по журналу видно, с чем работала программа (без ключей)."""
+    b = c.get("backend")
+    log.info("Версия %s; нейросеть %s, модель %s; режим %s; почта %s; профиль %s", core.VERSION, b,
+             c.get(MODEL_KEYS.get(b, ""), "") or DEFAULT_MODEL, c["mode"], "да" if mail_on else "нет",
+             "заполнен" if profile_complete(c["profile"]) else "НЕ заполнен")
+    log.info("Фильтры: %s", ", ".join(f"{k}={v}" for k, v in c["filters"].items()))
+    for name in names:   # площадки этого запуска
+        pc = c["platforms"][name]
+        log.info("%s: режим %s, лимит %s/день, пауза между письмами %s с, опрос %s с", name,
+                 pc.get("mode") or c["mode"], pc["daily_cap"], pc["min_gap_sec"], pc["poll"])
 
 
 def play_sound():
@@ -670,7 +695,7 @@ class App(ctk.CTk):
         else:
             self.stop_run()
 
-    def prepare_start(self, auto=False) -> bool:
+    def prepare_start(self, auto=False, only=None) -> bool:
         """Проверяет, что есть всё нужное для запуска. Gmail и профиль не обязательны — только предупреждаем."""
         if not self.apply_settings(silent=True):
             return False
@@ -681,10 +706,13 @@ class App(ctk.CTk):
         if not ai_ready(c):
             problems.append("Настройте нейросеть во вкладке «Настройки»: выберите способ и введите ключ "
                             "или войдите в аккаунт.")
+        no_platform = only is None and not any(c["platforms"][k].get("enabled") for k, _, cls in PLATFORM_ROWS if cls)
+        if no_platform:
+            problems.append("Не выбрано ни одной площадки: включите переключатель у нужных во вкладке «Статус».")
         if problems:
             log.warning("Запуск невозможен: %s", " ".join(problems))
             if not auto:
-                self.tabs.set("Настройки")
+                self.tabs.set("Статус" if no_platform and len(problems) == 1 else "Настройки")
                 messagebox.showerror("Запуск", "\n".join(problems))
             return False
         notes = []
@@ -700,14 +728,18 @@ class App(ctk.CTk):
             messagebox.showwarning("Запуск", " ".join(notes))
         return True
 
-    def start_run(self, auto=False):
+    def start_run(self, auto=False, only=None):
+        """only — ключи площадок, запускаемых по одной; None — все, у которых включён переключатель."""
         if self.busy or self.status != "stopped":
             return
-        if not self.prepare_start(auto):
+        if not self.prepare_start(auto, only):
             return
         self.busy = True
         self.set_status("starting")
-        log.info("Запускаю…")
+        if only:
+            log.info("Запускаю только %s…", ", ".join(PLATFORM_NAMES[k] for k in only))
+        else:
+            log.info("Запускаю…")
 
         def done(_, err):
             self.busy = False
@@ -721,9 +753,9 @@ class App(ctk.CTk):
             self.set_status("running")
             log.info("Работа начата")
             self.refresh_status(once=True)
-        self.submit(self._start_engine(), done)
+        self.submit(self._start_engine(only), done)
 
-    async def _start_engine(self):
+    async def _start_engine(self, only=None):
         """Собирает движок и бот в цикле asyncio. Движку нужен уведомитель, а боту — движок: движок
         создаётся с notifier=None, а start_bot сам создаёт TelegramNotifier и вешает его на engine.notifier
         до первого вызова engine.run()."""
@@ -731,7 +763,9 @@ class App(ctk.CTk):
         mail = (MailWatcher(c["gmail_user"], c["gmail_app_password"], c["mail_state"])
                 if c["gmail_user"] and c["gmail_app_password"] else None)
         sources = {name: cls() for name, _, cls in PLATFORM_ROWS if cls}
-        engine = Engine(c, self.store, AIClient(c, log), sources, self.browser, notifier=None, mail=mail)
+        engine = Engine(c, self.store, AIClient(c, log), sources, self.browser, notifier=None, mail=mail,
+                        debug_dir=BASE / "debug", only=only)
+        log_settings(c, mail is not None, [k for k in sources if engine.active(k)])
         poll_once = engine.poll_once
 
         async def tracked(platform: str):   # Engine не хранит время опроса — запоминаем здесь
@@ -955,12 +989,23 @@ class App(ctk.CTk):
         for i, (key, name, cls) in enumerate(PLATFORM_ROWS, start=1):
             ui = {"state": ctk.CTkLabel(box, text="", anchor="w"), "poll": ctk.CTkLabel(box, text="—", anchor="w"),
                   "sent": ctk.CTkLabel(box, text="—", anchor="w")}
-            ctk.CTkLabel(box, text=name, font=ctk.CTkFont(weight="bold")).grid(row=i, column=0, sticky="w", padx=14, pady=6)
+            if cls:   # переключатель — участвует ли площадка в общем запуске (кнопка сверху)
+                ui["track"] = ctk.CTkSwitch(box, text=name, font=ctk.CTkFont(weight="bold"),
+                                            command=lambda k=key: self.on_track(k))
+                if self.conf["platforms"][key].get("enabled"):
+                    ui["track"].select()
+                ui["track"].grid(row=i, column=0, sticky="w", padx=14, pady=6)
+            else:
+                ctk.CTkLabel(box, text=name, font=ctk.CTkFont(weight="bold")).grid(row=i, column=0, sticky="w",
+                                                                                   padx=14, pady=6)
             for col, k in enumerate(("state", "poll", "sent"), start=1):
                 ui[k].grid(row=i, column=col, sticky="w", padx=14)
             if cls:
                 btns = ctk.CTkFrame(box, fg_color="transparent")
                 btns.grid(row=i, column=4, sticky="e", padx=10)
+                ui["run"] = ctk.CTkButton(btns, text="▶ Только эту", width=120, fg_color=GREEN,
+                                          hover_color=GREEN_HOVER, command=lambda k=key: self.on_run_one(k))
+                ui["run"].pack(side="left", padx=3)
                 ui["login"] = ctk.CTkButton(btns, text="Войти", width=90, command=lambda k=key: self.on_login(k))
                 ui["login"].pack(side="left", padx=3)
                 ui["pause"] = ctk.CTkButton(btns, text="Пауза", width=100, fg_color=GRAY, hover_color=GRAY_HOVER,
@@ -973,6 +1018,8 @@ class App(ctk.CTk):
         self.hints_lbl = ctk.CTkLabel(tab, text="", anchor="w", justify="left", wraplength=900, text_color=AMBER)
         self.hints_lbl.pack(fill="x", padx=18, pady=2)
         ctk.CTkLabel(tab, anchor="w", justify="left", wraplength=900, text_color="gray", text=(
+            "Переключатель у площадки — участвует ли она, когда нажимаете «▶ Запустить» сверху (во время работы "
+            "действует сразу). «▶ Только эту» — запустить одну площадку; во время работы — добавить её к запуску. "
             "Всем остальным (черновики, фильтры, профиль, режим «авто / подтверждать») управляет Telegram-бот. "
             "Immowelt и ImmoScout24 появятся в следующих версиях.")).pack(fill="x", padx=18, pady=(4, 0))
 
@@ -992,6 +1039,7 @@ class App(ctk.CTk):
                   "today": {}}
         st["sent"] = {k: self.store.sent_count(k, since) for k, _, cls in PLATFORM_ROWS if cls}
         st["running"] = e is not None
+        st["active"] = [k for k in e.sources if e.active(k)] if e else []
         return st
 
     def refresh_status(self, once=False):
@@ -1011,8 +1059,8 @@ class App(ctk.CTk):
             return f"проблема: {KIND_TEXT[blocking[0]]}", AMBER
         if not st["running"]:
             return "не запущено", "gray"
-        if not (self.conf["platforms"].get(key) or {}).get("enabled"):
-            return "выключена", "gray"
+        if key not in st["active"]:
+            return "не в этом запуске", "gray"
         if st["paused_all"] or key in st["paused"]:
             return "пауза", AMBER
         return "включена", GREEN
@@ -1033,6 +1081,8 @@ class App(ctk.CTk):
             ui["sent"].configure(text=f"{st['sent'][key]} из {cap}")
             paused = st["paused_all"] or key in st["paused"]
             ui["pause"].configure(text="Продолжить" if paused else "Пауза", state="normal" if running else "disabled")
+            ui["run"].configure(text="▶ Добавить" if running else "▶ Только эту",
+                                state="disabled" if self.busy or key in st["active"] else "normal")
             if key not in self.login_btns:   # во время входа кнопка «Войти» занята другим
                 ui["login"].configure(text="Войти", state="normal")
             # напоминание в трей о новой проблеме, если окно скрыто
@@ -1061,6 +1111,28 @@ class App(ctk.CTk):
         self.snap = st
         if running and not self.busy and self.status in ("running", "problem"):   # устаревший снимок не «оживляет»
             self.set_status("problem" if problem else "running")
+
+    def on_track(self, key: str):
+        """Переключатель площадки: сохраняется в настройках; идущий общий запуск подхватывает его сразу."""
+        on = bool(self.plat_ui[key]["track"].get())
+        self.conf["platforms"][key]["enabled"] = on
+        self.save()
+        log.info("%s: %s", PLATFORM_NAMES[key], "отслеживается при общем запуске" if on
+                 else "не отслеживается при общем запуске")
+        if self.engine:
+            self.loop.call_soon_threadsafe(self.engine.wake, key)
+        self.after(200, lambda: self.refresh_status(once=True))
+
+    def on_run_one(self, key: str):
+        """Остановлено — запуск только этой площадки; работает — площадка добавляется к запуску."""
+        if self.busy:
+            return
+        if self.status == "stopped":
+            self.start_run(only={key})
+        elif self.engine:
+            self.loop.call_soon_threadsafe(self.engine.activate, key)
+            log.info("%s: добавлена к запуску", PLATFORM_NAMES[key])
+            self.after(200, lambda: self.refresh_status(once=True))
 
     def on_pause(self, key: str):
         e = self.engine
