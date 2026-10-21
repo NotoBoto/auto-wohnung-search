@@ -173,6 +173,7 @@ class OwnerBot:
         # chat → (id черновика, его сообщение с кнопками, подсказка «пришлите текст»)
         self.pending_edit: dict[int, tuple[int, object, object]] = {}
         self.wizard: dict[int, list[str]] = {}                # chat → оставшиеся поля профиля
+        self._tasks: set[asyncio.Task] = set()                # фоновые отправки (печать письма идёт минуту-две)
 
     # ---------- общее ----------
 
@@ -410,8 +411,7 @@ class OwnerBot:
                     await self._collapse(draft_msg, id, "↻ Готовлю новый вариант…")
                     await self.engine.regenerate(id, text[1:].strip())
                 else:
-                    await self.engine.approve(id, text)
-                    await self._collapse(draft_msg, id, self._approve_outcome(id))
+                    await self._approve(id, text, draft_msg)
             except Exception as e:
                 log.exception("правка черновика #%s", id)
                 await self._say(update, f"Ошибка: {type(e).__name__}")
@@ -422,10 +422,35 @@ class OwnerBot:
 
     # ---------- кнопки ----------
 
+    async def _approve(self, id: int, text: str | None, message) -> None:
+        """Сразу показывает «Отправляю…», а саму отправку ведёт в фоне: бот не молчит минуту, пока печатается письмо."""
+        if self.store.get(id).status != "draft":
+            await self._collapse(message, id, self._approve_outcome(id))
+            return
+        await self._collapse(message, id, "⏳ Отправляю…")
+        task = asyncio.get_running_loop().create_task(self._finish_approve(id, text, message))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _finish_approve(self, id: int, text: str | None, message) -> None:
+        try:
+            await self.engine.approve(id, text)
+        except Exception as e:
+            log.exception("отправка #%s", id)
+            await self._collapse(message, id, f"Ошибка отправки: {type(e).__name__}, см. журнал")
+            return
+        await self._collapse(message, id, self._approve_outcome(id))
+
+    async def drain(self) -> None:
+        """Дождаться фоновых отправок (тесты, остановка)."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
     def _approve_outcome(self, id: int) -> str:
         status = self.store.get(id).status
-        return {"sent": "✓ Отправлено", "queued": "✓ В очереди на отправку",
-                "sending": "✓ Отправляется"}.get(status, f"Не отправлено (статус: {status})")
+        return {"sent": "✓ Отправлено", "queued": "⏳ В очереди на отправку (лимит или пауза)",
+                "sending": "? Не ясно, ушло ли — см. вопрос ниже",
+                "draft": "✎ Нужна правка — см. новый черновик"}.get(status, f"Не отправлено (статус: {status})")
 
     def _dup_outcome(self, id: int) -> str:
         status = self.store.get(id).status
@@ -458,8 +483,8 @@ class OwnerBot:
         """Выполняет действие кнопки; возвращает итог для сообщения или None (кнопки остаются)."""
         e = self.engine
         if kind == "send":
-            await e.approve(id)
-            return self._approve_outcome(id)
+            await self._approve(id, None, update.callback_query.message)
+            return None
         if kind == "edit":
             if self.store.get(id).status != "draft":
                 return "Уже обработано"

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -253,8 +254,11 @@ async def test_send_button_approves_and_removes_keyboard(env):
     q = Query(f"send:{env.id}")
     u, _ = upd(OWNER, query=q)
     await env.bot.on_callback(u, ctx())
-    assert env.engine.calls == [("approve", env.id, None)] and q.answered
-    text, markup = q.edits[0]   # черновик свёрнут в одну строку-итог
+    # сразу видно, что отправка идёт, ещё до конца медленной отправки
+    assert q.answered and q.edits[0][1] is None and "Отправляю" in q.edits[0][0]
+    await env.bot.drain()
+    assert env.engine.calls == [("approve", env.id, None)]
+    text, markup = q.edits[-1]   # черновик свёрнут в одну строку-итог
     assert markup is None and "draft text" not in text and "Titel" in text and f"#{env.id}" in text
     assert "очереди" in text or "Отправл" in text
 
@@ -292,8 +296,10 @@ async def test_edit_flow_plain_text_approves(env):
     assert env.bot.pending_edit[OWNER][:2] == (env.id, q.message) and q.edits == []   # кнопки остаются до итога
     u2, answer = upd(OWNER, "Neuer Text")
     await env.bot.on_text(u2, ctx())
-    assert env.engine.calls == [("approve", env.id, "Neuer Text")] and env.bot.pending_edit == {}
-    text, markup = q.edits[0]   # исходный черновик свёрнут в строку-итог
+    assert "Отправляю" in q.edits[0][0] and env.bot.pending_edit == {}
+    await env.bot.drain()
+    assert env.engine.calls == [("approve", env.id, "Neuer Text")]
+    text, markup = q.edits[-1]   # исходный черновик свёрнут в строку-итог
     assert markup is None and "draft text" not in text and "очереди" in text
     # подсказка бота и ответ владельца удалены, лишних ответов нет
     assert prompt.deleted and answer.deleted and answer.replies == []
@@ -453,3 +459,28 @@ async def test_sent_without_draft_message_sends_nothing(tmp_path):
     await n.drain()
     await n.stop()
     assert bot.sent == [] and not getattr(bot, "edited", [])
+
+
+async def test_send_runs_in_background_and_reports_result(env):
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_approve(id, text=None):
+        started.set()
+        await release.wait()   # медленная печать письма на сайте
+        env.store.set_status(id, "sent")
+    env.engine.approve = slow_approve
+    q = Query(f"send:{env.id}")
+    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())   # не ждёт конца отправки
+    await asyncio.sleep(0)
+    assert started.is_set() and len(q.edits) == 1 and "Отправляю" in q.edits[0][0]
+    release.set()
+    await env.bot.drain()
+    assert "Отправлено" in q.edits[-1][0]
+
+
+async def test_send_button_on_processed_draft_does_nothing(env):
+    env.store.set_status(env.id, "sent")
+    q = Query(f"send:{env.id}")
+    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
+    await env.bot.drain()
+    assert env.engine.calls == [] and "Отправлено" in q.edits[-1][0]
