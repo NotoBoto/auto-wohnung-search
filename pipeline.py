@@ -27,7 +27,8 @@ MAINTENANCE_EVERY = 60   # чистка черновиков и сводка, с
 MISSING_PROFILE_EVERY = timedelta(hours=24)
 GENERATING = "generating"   # reason у строки, зарезервированной на время генерации письма
 NO_PROFILE = "профиль не заполнен"   # reason у строки seen: ждёт профиля
-RECHECK_WINDOW = timedelta(hours=24)  # такие seen обрабатываем, когда профиль заполнен
+RECHECK_WINDOW = timedelta(hours=24)  # такие seen обрабатываем, когда профиль заполнен; столько же живёт повтор failed
+LOAD_FAILED = "объявление не загрузилось"   # начало reason у failed без сбоя письма — такие не повторяем
 BLOCKING_KINDS = ("captcha", "logged_out", "blocked", "broken")   # эти случаи держат площадку на паузе
 
 
@@ -344,7 +345,7 @@ class Engine:
         try:
             l = self._listings.get(id) or await self._detail(row.platform, self._row_listing(row))
         except Exception as e:
-            self.store.set_status(id, "failed", reason=f"объявление не загрузилось: {e}"[:300])
+            self.store.set_status(id, "failed", reason=f"{LOAD_FAILED}: {e}"[:300])
             return
         self._listings[id] = l
         await self._write_letter(id, l, estimate_warm(l)[1], wish, force_draft=True)
@@ -366,7 +367,7 @@ class Engine:
             try:
                 l = await self._detail(row.platform, self._row_listing(row))
             except Exception as e:
-                self.store.set_status(id, "failed", reason=f"объявление не загрузилось: {e}"[:300])
+                self.store.set_status(id, "failed", reason=f"{LOAD_FAILED}: {e}"[:300])
                 return
             self._listings[id] = l
         await self._continue(id, l)
@@ -458,6 +459,42 @@ class Engine:
             self.store.set_meta("digest_day", day)   # переживает перезапуск
             await self._safe(self.notifier.digest(self._day_stats(local.date())))
         await self.profile_updated()
+        await self._retry_failed()
+
+    def _ai_down(self) -> bool:
+        return any(p == "ai" for p, _ in self.store.open_incidents())
+
+    async def _retry_failed(self) -> None:
+        """R21: строки, не получившие письмо из-за сбоя нейросети/письма или прерванной генерации за последние
+        24 ч, один раз проходят конвейер заново (дедупликация и резерв — как в _recheck), когда нейросеть жива."""
+        since = self.clock() - RECHECK_WINDOW
+        for snap in self.store.by_status("failed"):
+            if self._ai_down():
+                return
+            row = self.store.get(snap.id)
+            key = f"retried:{row.id}"
+            if (row.status != "failed" or row.created_at < since or row.reason.startswith(LOAD_FAILED)
+                    or self.store.get_meta(key) or self._paused_now(row.platform)):
+                continue
+            if row.id not in self._listings and row.platform not in self.sources:
+                continue
+            try:
+                l = self._listings.get(row.id) or await self._detail(row.platform, self._row_listing(row), check_pause=True)
+            except Paused:
+                continue
+            except BlockedError as e:   # площадка на паузе; повторим после неё, если 24 ч не прошли
+                await self._block(row.platform, e.kind, str(e))
+                continue
+            except SourceBroken as e:
+                await self._block(row.platform, "broken", str(e))
+                continue
+            except Exception:
+                self.store.set_meta(key, self.clock().isoformat())
+                log.exception("%s: объявление #%s не загрузилось", row.platform, row.id)
+                continue
+            self.store.set_meta(key, self.clock().isoformat())   # один раз, даже если повтор снова не удастся
+            self._listings[row.id] = l
+            await self._recheck(row.id, l, expect="failed")
 
     async def profile_updated(self) -> None:
         """Профиль заполнен: объявления, отложенные за последние 24 ч, один раз проходят конвейер."""
@@ -493,14 +530,14 @@ class Engine:
             self._listings[row.id] = l
             await self._recheck(row.id, l)
 
-    async def _recheck(self, id: int, l: Listing) -> str:
+    async def _recheck(self, id: int, l: Listing, expect: str = "seen") -> str:
         """Дедупликация уже записанной строки и резерв — как шаг 3 в process(), без await до резерва."""
         row = self.store.get(id)
-        if row.status != "seen":   # строку уже обработал другой вызов — не трогаем
+        if row.status != expect:   # строку уже обработал другой вызов — не трогаем
             return row.status
         warm = estimate_warm(l)[0]
         # find_dedup сначала находит саму строку по (platform, ext_id) — ищем по адресу с подменённым ext_id;
-        # сама строка в seen не блокирующая, поэтому совпасть с собой не может
+        # сама строка в seen/failed не блокирующая, поэтому совпасть с собой не может
         probe = dataclasses.replace(l, ext_id=l.ext_id + "#recheck")
         d = self.store.find_dedup(probe, warm, self.cfg["dedup_days"])
         if d.match_id == id:   # на всякий случай: совпадение с собой — не дубль

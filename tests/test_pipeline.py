@@ -688,6 +688,51 @@ async def test_contact_cap_rechecked_at_send():
 
 # ---------- обслуживание ----------
 
+async def test_interrupted_generation_retried_once_by_maintenance():
+    env = Env()
+    env.ka.details = {"1": L(), "2": L(ext_id="2", street="Andere Str. 1")}
+    env.clock.now = T0 - timedelta(hours=25)
+    old = env.store.add(L(ext_id="2", street="Andere Str. 1"), 800)        # старше 24 ч — не трогаем
+    env.store.set_status(old, "queued", reason="generating")
+    env.clock.now = T0
+    i = env.store.add(L(), 800)
+    env.store.set_status(i, "queued", reason="generating")
+    await env.engine.startup()                       # прервано при генерации → failed
+    await env.engine.maintenance_once()
+    await env.engine.maintenance_once()
+    assert env.store.get(i).status == "draft" and env.store.get(old).status == "failed"
+    assert len(env.ai.calls) == 1 and len(env.notifier.names("draft")) == 1
+
+
+async def test_ai_failed_rows_retried_once_after_ai_incident_closed():
+    env = Env()
+    env.ai.exc = AIError("нейросеть недоступна")
+    await env.engine.process("kleinanzeigen", L())                       # #1 failed, случай «ai» открыт
+    await env.engine.maintenance_once()
+    assert len(env.ai.calls) == 1                     # случай открыт — не повторяем
+    env.ai.exc = None
+    await env.engine.process("kleinanzeigen", L(ext_id="2", street="Andere Str. 1", contact_name="Frau Weber"))
+    assert env.store.open_incidents() == []           # нейросеть ожила
+    env.ai.exc = AIError("снова сбой")
+    await env.engine.maintenance_once()               # повтор #1 — снова сбой
+    assert env.store.get(1).status == "failed" and len(env.ai.calls) == 3
+    env.ai.exc = None
+    env.store.close_incidents("ai")
+    await env.engine.maintenance_once()               # второй раз не повторяем
+    assert env.store.get(1).status == "failed" and len(env.ai.calls) == 3
+
+
+async def test_failed_retry_does_not_write_second_letter_for_same_flat():
+    env = Env()
+    env.ai.exc = AIError("нейросеть недоступна")
+    await env.engine.process("kleinanzeigen", L())                      # #1 failed
+    env.ai.exc = None
+    env.wg.details["w1"] = L("wggesucht", "w1")
+    assert await env.engine.process("wggesucht", L("wggesucht", "w1")) == "draft"   # та же квартира
+    await env.engine.maintenance_once()
+    assert env.store.get(1).status == "duplicate" and len(env.notifier.names("draft")) == 1
+
+
 async def test_draft_expires_after_12h(eng):
     await eng.engine.process("kleinanzeigen", L())
     eng.clock.now = T0 + timedelta(hours=11, minutes=59)
