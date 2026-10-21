@@ -5,7 +5,7 @@ from datetime import datetime
 
 from browser import human_pause, human_type
 from models import Listing, parse_area, parse_money, parse_rooms
-from sources.base import BlockedError, Source, SourceBroken, listing_flags
+from sources.base import BlockedError, MissingFieldError, NotSubmittedError, Source, SourceBroken, listing_flags
 
 log = logging.getLogger(__name__)
 
@@ -218,13 +218,28 @@ class WgGesucht(Source):
 
     # не проверено вживую — проверить после входа пользователя
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
+        try:
+            await self._fill_form(page, l, text)
+        except (BlockedError, MissingFieldError, NotSubmittedError):
+            raise
+        except Exception as e:   # до нажатия «Отправить» письмо точно не ушло
+            raise NotSubmittedError(f"wggesucht: форма не заполнена: {e}") from e
+        await page.locator("button:has-text('Nachricht senden'), button[type='submit']:has-text('Senden')").last.click()
+        ok = page.get_by_text(re.compile(r"Nachricht (wurde )?(erfolgreich )?(gesendet|verschickt)|erfolgreich (gesendet|verschickt)", re.I))
+        try:
+            await ok.first.wait_for(timeout=15000)
+        except Exception as e:   # после нажатия исход неизвестен — не SourceBroken/NotSubmittedError
+            raise RuntimeError("wggesucht: подтверждение отправки не найдено") from e
+
+    async def _fill_form(self, page, l: Listing, text: str) -> None:
+        """Всё до нажатия «Отправить»."""
         # форма сообщения — отдельная страница /nachricht-senden/<slug>.<id>.html
         await self._open(page, l.url.replace(f"{BASE}/", f"{BASE}/nachricht-senden/", 1))
         msg = page.locator("textarea#message_input, textarea[name='content'], textarea").first
         try:
             await msg.wait_for(state="visible", timeout=8000)
         except Exception as e:
-            raise SourceBroken("wggesucht: форма сообщения не найдена") from e
+            raise NotSubmittedError("wggesucht: форма сообщения не найдена") from e
         # площадка может открыть окно с шаблоном/подтверждением: закрыть его и вставить свой текст
         for sel in (".modal.in button.close", ".modal.in [data-dismiss='modal']", "button:has-text('Vorlage ignorieren')"):
             try:
@@ -238,9 +253,3 @@ class WgGesucht(Source):
         await msg.fill("")   # убрать шаблон, подставленный площадкой
         await human_type(msg, text)
         await human_pause()
-        await page.locator("button:has-text('Nachricht senden'), button[type='submit']:has-text('Senden')").last.click()
-        ok = page.get_by_text(re.compile(r"Nachricht (wurde )?(erfolgreich )?(gesendet|verschickt)|erfolgreich (gesendet|verschickt)", re.I))
-        try:
-            await ok.first.wait_for(timeout=15000)
-        except Exception as e:
-            raise SourceBroken("wggesucht: подтверждение отправки не найдено") from e

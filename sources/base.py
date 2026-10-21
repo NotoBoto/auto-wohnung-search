@@ -44,6 +44,10 @@ class SourceBroken(RuntimeError):
     """Разметка не распознана: селекторы устарели."""
 
 
+class NotSubmittedError(RuntimeError):
+    """Сбой отправки ДО нажатия «Отправить» (форма/кнопка не найдена, окно входа): письмо точно не ушло."""
+
+
 class MissingFieldError(RuntimeError):
     """Форма требует поле, которого нет в профиле."""
     def __init__(self, field: str):
@@ -91,7 +95,10 @@ class Source(ABC):
         return self.parse_detail(await self._load(page, l.url), l)
 
     @abstractmethod
-    async def send(self, page, l: Listing, text: str, profile: dict) -> None: ...
+    async def send(self, page, l: Listing, text: str, profile: dict) -> None:
+        """Инвариант: BlockedError, MissingFieldError, NotSubmittedError и SourceBroken — только ДО нажатия
+        «Отправить» (письмо точно не ушло, Engine вернёт строку в очередь). Сбой после нажатия — любое другое
+        исключение: исход неизвестен, Engine спросит владельца."""
 
     @abstractmethod
     async def is_logged_in(self, page) -> bool: ...

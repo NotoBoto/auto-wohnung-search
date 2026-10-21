@@ -9,7 +9,7 @@ from ai import AIError
 from mail import Reply
 from models import Listing
 from pipeline import Engine
-from sources.base import BlockedError, MissingFieldError, SourceBroken
+from sources.base import BlockedError, MissingFieldError, NotSubmittedError, SourceBroken
 from store import Store
 
 T0 = datetime(2026, 10, 21, 10, 0, 0)   # наивный UTC = 12:00 в Бонне (CEST)
@@ -435,11 +435,67 @@ async def test_send_error_keeps_sending_and_asks_owner():
     assert env.store.get(1).status == "sending" and env.store.by_status("failed") == []
     assert env.notifier.names("ask_stuck") == [("ask_stuck", 1)]
     assert env.notifier.names("incident") == [("incident", "kleinanzeigen", "send")]
+    assert "kleinanzeigen" in env.engine.status()["paused"]   # исход неизвестен — площадку не трогаем
     await env.engine.regenerate(1)
     await env.engine.send_queued_once()
     await env.engine.startup()   # тот же сеанс: повторно не спрашиваем
     assert env.store.get(1).status == "sending" and len(env.ai.calls) == 1
     assert len(env.notifier.names("ask_stuck")) == 1
+
+
+def five_queued(env):
+    for i in range(5):
+        env.store.add(L(ext_id=str(i), street=f"Gasse {i}", contact_name=f"Kontakt {i}"), 800)
+        env.store.set_status(i + 1, "queued", letter=letter(i))
+
+
+@pytest.mark.parametrize("exc", [NotSubmittedError("форма не найдена"), SourceBroken("форма не найдена")])
+async def test_not_submitted_requeues_pauses_once(exc):
+    env = Env(mode="auto")
+    five_queued(env)
+    calls = []
+
+    async def send(page, l, text, profile):
+        calls.append(l.ext_id)
+        raise exc
+    env.ka.send = send
+    for _ in range(5):
+        await env.engine.send_queued_once()
+        env.clock.now += timedelta(seconds=10)
+    assert calls == ["0"] and "kleinanzeigen" in env.engine.status()["paused"]
+    assert [r.status for r in map(env.store.get, range(1, 6))] == ["queued"] * 5
+    assert env.store.get(1).letter == letter(0)
+    assert env.notifier.calls == [("incident", "kleinanzeigen", "broken")]
+
+
+async def test_unknown_send_error_pauses_platform_one_stuck_row():
+    env = Env(mode="auto")
+    five_queued(env)
+    calls = []
+
+    async def send(page, l, text, profile):
+        calls.append(l.ext_id)
+        raise RuntimeError("после нажатия")
+    env.ka.send = send
+    for _ in range(5):
+        await env.engine.send_queued_once()
+        env.clock.now += timedelta(seconds=10)
+    assert calls == ["0"] and "kleinanzeigen" in env.engine.status()["paused"]
+    assert len(env.store.by_status("sending")) == 1 and len(env.store.by_status("queued")) == 4
+    assert sorted(c[0] for c in env.notifier.calls) == ["ask_stuck", "incident"]
+
+
+async def test_resolve_stuck_lifts_only_its_own_pause():
+    env = Env(mode="auto")
+    five_queued(env)
+    env.ka.send_exc = RuntimeError("после нажатия")
+    await env.engine.send_queued_once()
+    await env.engine.resolve_stuck(1, was_sent=True)
+    assert env.engine.status()["paused"] == [] and env.store.open_incidents() == []
+    env.engine.pause("kleinanzeigen")   # пауза владельца ответом на вопрос не снимается
+    env.store.set_status(2, "sending")
+    await env.engine.resolve_stuck(2, was_sent=False)
+    assert env.engine.status()["paused"] == ["kleinanzeigen"]
 
 
 async def test_send_incident_closes_after_success_and_does_not_pause_on_restart():

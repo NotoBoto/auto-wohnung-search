@@ -16,7 +16,8 @@ from ai import AIError
 from filters import check, estimate_warm
 from letter import LetterError, generate_letter
 from models import Listing, profile_complete
-from sources.base import TZ, BlockedError, MissingFieldError, RateLimiter, SourceBroken, poll_interval
+from sources.base import (TZ, BlockedError, MissingFieldError, NotSubmittedError, RateLimiter, SourceBroken,
+                          poll_interval)
 from store import Row, Store, contact_key
 
 log = logging.getLogger("wohnung")
@@ -68,6 +69,7 @@ class Engine:
         self._listings: dict[int, Listing] = {}      # подробности объявления для отправки и перегенерации
         self._draft_at: dict[int, datetime] = {}     # когда показан черновик (для draft_ttl_hours)
         self._asked_stuck: set[int] = set()
+        self._stuck_paused: set[str] = set()   # площадки на паузе из-за неясной отправки (снимает resolve_stuck)
         self._recheck_lock = asyncio.Lock()   # profile_updated: один проход за раз
         self._stop = asyncio.Event()
 
@@ -91,8 +93,10 @@ class Engine:
         if platform is None:
             self._paused_all = False
             self._paused.clear()
+            self._stuck_paused.clear()
         else:
             self._paused.discard(platform)
+            self._stuck_paused.discard(platform)
         for p in names:
             self.store.close_incidents(p)
 
@@ -258,9 +262,17 @@ class Engine:
                 await self._block(platform, e.kind, str(e))
             except MissingFieldError as e:
                 await self._to_draft(id, row.letter, False, f"нет поля: {e.field}")
+            except (NotSubmittedError, SourceBroken) as e:
+                # до нажатия «Отправить»: письмо точно не ушло — назад в очередь, площадка на паузе
+                self.store.set_status(id, "queued")
+                await self._block(platform, "broken", str(e))
             except Exception as e:
-                # исход неизвестен (форма могла уйти): остаётся sending, решает владелец через resolve_stuck
+                # после нажатия исход неизвестен (форма могла уйти): строка остаётся sending, решает владелец
+                # через resolve_stuck; площадка на паузе, иначе следующая строка застрянет так же
                 log.exception("%s: отправка #%s прервана", platform, id)
+                if not self._paused_now(platform):
+                    self._stuck_paused.add(platform)
+                self.pause(platform)
                 await self._incident(platform, "send", str(e))
                 await self._ask_stuck(self.store.get(id))
             else:
@@ -341,9 +353,16 @@ class Engine:
         self._asked_stuck.discard(id)   # новый неясный сбой этой строки — снова вопрос
         if was_sent:
             self.store.set_status(id, "sent", sent_at=self.clock())
-            self.store.close_incidents(row.platform, "send")
         else:
             self.store.set_status(id, "queued")
+        # пауза из-за неясной отправки снимается, когда владелец ответил по всем зависшим строкам площадки
+        # и нет других блокирующих случаев (капча, выход из аккаунта и т.п.)
+        p = row.platform
+        if not any(r.platform == p for r in self.store.by_status("sending")):
+            self.store.close_incidents(p, "send")
+            if p in self._stuck_paused and not any(ip == p and k in BLOCKING_KINDS for ip, k in self.store.open_incidents()):
+                self._paused.discard(p)
+            self._stuck_paused.discard(p)
 
     # ---------- циклы ----------
 

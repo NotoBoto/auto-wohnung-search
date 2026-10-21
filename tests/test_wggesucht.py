@@ -149,3 +149,38 @@ async def test_is_logged_in_captcha_raises():
         async def content(self): return "<html>Bitte lösen Sie das Captcha</html>"
     with pytest.raises(BlockedError):
         await WgGesucht().is_logged_in(P())
+
+
+# ---------- send (поддельная страница) ----------
+
+from fake_page import FakePage, fast_type, no_wait   # noqa: E402
+from sources.base import NotSubmittedError   # noqa: E402
+
+WG_FORM = ("textarea#message_input", "button:has-text('Nachricht senden')")
+
+
+@pytest.fixture
+def fast(monkeypatch):
+    import sources.wggesucht as wg
+    monkeypatch.setattr(wg, "human_type", fast_type)
+    monkeypatch.setattr(wg, "human_pause", no_wait)
+
+
+async def test_send_ok(fast):
+    page = FakePage(WG_FORM)
+    await WgGesucht().send(page, Listing("wggesucht", "14258763", URL), "Hallo", {})
+    assert page.typed == "Hallo" and page.submitted and "/nachricht-senden/" in page.url
+
+
+async def test_send_form_missing_is_not_submitted(fast):
+    page = FakePage(())
+    with pytest.raises(NotSubmittedError):
+        await WgGesucht().send(page, Listing("wggesucht", "14258763", URL), "Hallo", {})
+    assert not page.submitted
+
+
+async def test_send_unconfirmed_after_click_is_not_not_submitted(fast):
+    page = FakePage(WG_FORM, confirm=False)
+    with pytest.raises(RuntimeError) as e:
+        await WgGesucht().send(page, Listing("wggesucht", "14258763", URL), "Hallo", {})
+    assert not isinstance(e.value, (NotSubmittedError, SourceBroken)) and page.submitted

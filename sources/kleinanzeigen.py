@@ -4,7 +4,7 @@ import re
 
 from browser import human_pause, human_type
 from models import Listing, parse_area, parse_money, parse_rooms
-from sources.base import BlockedError, MissingFieldError, Source, SourceBroken, listing_flags
+from sources.base import BlockedError, MissingFieldError, NotSubmittedError, Source, SourceBroken, listing_flags
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +168,21 @@ class Kleinanzeigen(Source):
 
     # не проверено вживую — проверить после входа пользователя
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
+        try:
+            await self._fill_form(page, l, text, profile)
+        except (BlockedError, MissingFieldError, NotSubmittedError):
+            raise
+        except Exception as e:   # до нажатия «Отправить» письмо точно не ушло
+            raise NotSubmittedError(f"kleinanzeigen: форма не заполнена: {e}") from e
+        await page.locator("button[type='submit']:has-text('Senden'), button:has-text('Nachricht senden')").last.click()
+        ok = page.get_by_text(re.compile(r"Nachricht (wurde )?(erfolgreich )?(gesendet|verschickt)|erfolgreich (gesendet|verschickt)", re.I))
+        try:
+            await ok.first.wait_for(timeout=15000)
+        except Exception as e:   # после нажатия исход неизвестен — не SourceBroken/NotSubmittedError
+            raise RuntimeError("kleinanzeigen: подтверждение отправки не найдено") from e
+
+    async def _fill_form(self, page, l: Listing, text: str, profile: dict) -> None:
+        """Всё до нажатия «Отправить»."""
         await self._open(page, l.url)
         btn = page.locator("#viewad-contact-button-login-modal, #viewad-contact-button, button:has-text('Nachricht schreiben')").first
         msg = page.locator("textarea[name='message'], #viewad-contact-message, textarea").first
@@ -175,7 +190,7 @@ class Kleinanzeigen(Source):
             await btn.click(timeout=8000)
             await msg.wait_for(state="visible", timeout=8000)
         except Exception as e:
-            raise SourceBroken("kleinanzeigen: форма сообщения не найдена") from e
+            raise NotSubmittedError("kleinanzeigen: форма сообщения не найдена") from e
         # обязательное поле «Telefon» (если форма его требует), а в профиле его нет
         phone = page.locator("input[name='phoneNumber'], input[type='tel']").first
         if await phone.count() and await phone.is_visible() and not await phone.input_value():
@@ -185,9 +200,3 @@ class Kleinanzeigen(Source):
         await msg.click()
         await human_type(msg, text)
         await human_pause()
-        await page.locator("button[type='submit']:has-text('Senden'), button:has-text('Nachricht senden')").last.click()
-        ok = page.get_by_text(re.compile(r"Nachricht (wurde )?(erfolgreich )?(gesendet|verschickt)|erfolgreich (gesendet|verschickt)", re.I))
-        try:
-            await ok.first.wait_for(timeout=15000)
-        except Exception as e:
-            raise SourceBroken("kleinanzeigen: подтверждение отправки не найдено") from e

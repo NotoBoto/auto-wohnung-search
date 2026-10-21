@@ -123,3 +123,39 @@ async def test_is_logged_in_captcha_raises():
         async def content(self): return "<html>Geetest captcha</html>"
     with pytest.raises(BlockedError):
         await Kleinanzeigen().is_logged_in(P())
+
+
+# ---------- send (поддельная страница) ----------
+
+from fake_page import FakePage, fast_type, no_wait   # noqa: E402
+from sources.base import NotSubmittedError   # noqa: E402
+
+KA_FORM = ("#viewad-contact-button", "textarea[name='message']", "button[type='submit']:has-text('Senden')")
+AD = Listing("kleinanzeigen", "1", "https://www.kleinanzeigen.de/s-anzeige/x/1-203-1")
+
+
+@pytest.fixture
+def fast(monkeypatch):
+    import sources.kleinanzeigen as ka
+    monkeypatch.setattr(ka, "human_type", fast_type)
+    monkeypatch.setattr(ka, "human_pause", no_wait)
+
+
+async def test_send_ok(fast):
+    page = FakePage(KA_FORM)
+    await Kleinanzeigen().send(page, AD, "Hallo", {})
+    assert page.typed == "Hallo" and page.submitted
+
+
+async def test_send_form_missing_is_not_submitted(fast):
+    page = FakePage(("#viewad-contact-button",))   # кнопка есть, поля сообщения нет
+    with pytest.raises(NotSubmittedError):
+        await Kleinanzeigen().send(page, AD, "Hallo", {})
+    assert not page.submitted
+
+
+async def test_send_unconfirmed_after_click_is_not_not_submitted(fast):
+    page = FakePage(KA_FORM, confirm=False)
+    with pytest.raises(RuntimeError) as e:
+        await Kleinanzeigen().send(page, AD, "Hallo", {})
+    assert not isinstance(e.value, (NotSubmittedError, SourceBroken)) and page.submitted
