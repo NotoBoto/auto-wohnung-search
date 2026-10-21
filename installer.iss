@@ -15,7 +15,7 @@
 
 [Setup]
 ; AppId не менять — по нему установщик узнаёт уже установленную программу
-AppId={{D13233E6-28FE-473E-884B-760DB3473D34}
+AppId={{BB4CC382-BC55-499D-B2A5-F38C48D1FBE4}
 AppName={#AppTitle}
 AppVersion={#AppVersion}
 AppVerName={#AppTitle} {#AppVersion}
