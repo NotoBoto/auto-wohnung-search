@@ -30,7 +30,9 @@ def profile_complete(profile: dict) -> bool:
 
 _MONEY_RE = re.compile(r"\d+(?:\.\d{3})*(?:,\d+)?")   # точка — разделитель тысяч только перед тремя цифрами
 _DECIMAL_RE = re.compile(r"\d+(?:[.,]\d+)?")
-_LEASE_RE = re.compile(r"(\d+)\s*(Monate?|Jahre?)", re.IGNORECASE)
+_LEASE_RE = re.compile(r"(\d+)\s*(Monate|Monaten|Monat|Jahre|Jahren|Jahr)\b", re.IGNORECASE)
+_LEASE_KEYWORD_RE = re.compile(r"befristet|zwischenmiete|auf zeit|für|mietdauer|laufzeit|bis zu", re.IGNORECASE)
+_LEASE_EXCLUDE_RE = re.compile(r"kündigungsfrist|kaution", re.IGNORECASE)
 
 
 def _first_number(s: str, pattern: re.Pattern) -> str | None:
@@ -55,8 +57,14 @@ def parse_area(s: str) -> float | None:
 
 
 def parse_lease_months(text: str) -> int | None:
-    m = _LEASE_RE.search(text or "")
-    if not m:
+    text = text or ""
+    if re.search(r"unbefristet", text, re.IGNORECASE):
         return None
-    n = int(m.group(1))
-    return n if m.group(2).lower().startswith("monat") else 12 * n
+    for m in _LEASE_RE.finditer(text):
+        # срок учитываем только если рядом есть ключевое слово аренды; Kündigungsfrist и Kaution — не срок аренды
+        window = text[max(0, m.start() - 40):m.start()]
+        if _LEASE_EXCLUDE_RE.search(window) or not _LEASE_KEYWORD_RE.search(window):
+            continue
+        n = int(m.group(1))
+        return n if m.group(2).lower().startswith("monat") else 12 * n
+    return None

@@ -14,8 +14,13 @@ def test_parse_rooms(s, v): assert parse_rooms(s) == v
 def test_parse_area(s, v): assert parse_area(s) == v
 
 @pytest.mark.parametrize("t,v", [("befristet auf 6 Monate", 6), ("Zwischenmiete für 3 Monate", 3),
-                                 ("befristet bis 1 Jahr", 12), ("unbefristet", None)])
+                                 ("befristet bis 1 Jahr", 12), ("unbefristet", None),
+                                 ("Mietdauer: 2 Jahre", 24)])
 def test_parse_lease_months(t, v): assert parse_lease_months(t) == v
+
+@pytest.mark.parametrize("t", ["unbefristet, Kündigungsfrist 3 Monate", "3 Monatsmieten Kaution",
+                               "seit 2 Jahren vermietet"])
+def test_parse_lease_months_no_false_positive(t): assert parse_lease_months(t) is None
 
 def test_profile_complete():
     p = {"salutation": "Herr", "first_name": "A", "last_name": "B", "persons": 2, "move_in": "01.01.2027", "about": "x"}
