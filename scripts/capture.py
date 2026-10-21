@@ -35,6 +35,8 @@ def main(argv: list[str]) -> None:
     accept = None
     if platform == "kleinanzeigen":
         from sources.kleinanzeigen import accept_consent as accept
+    elif platform == "wggesucht":
+        from sources.wggesucht import accept_consent as accept
     print(asyncio.run(capture(platform, url, out, base, accept)))
 
 
