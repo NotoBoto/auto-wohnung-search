@@ -12,7 +12,7 @@ TZ = ZoneInfo("Europe/Berlin")
 NIGHT_END_HOUR = 7   # ночь: 00:00–06:59 местного времени
 
 
-_NEG = r"(?<!\w)(?:kein|keine|keinen|keiner|ohne|nicht|nicht nötig)\W+(?:\w+\W+){0,2}?"
+_NEG = r"(?<!\w)(?:kein|keine|keinen|keiner|ohne|nicht)[^\w.,;:!?\n]+(?:\w+[^\w.,;:!?\n]+){0,2}?"
 
 
 def _kw(pattern: str, text: str) -> bool:

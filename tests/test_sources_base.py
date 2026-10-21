@@ -144,3 +144,13 @@ def test_missing_field_error():
 def test_listing_flags(text, key, value):
     from sources.base import listing_flags
     assert listing_flags(text)[key] == value
+
+
+@pytest.mark.parametrize("text,key", [
+    ("Keine Haustiere. WBS erforderlich", "wbs_required"),
+    ("ohne Provision, WBS erforderlich", "wbs_required"),
+    ("Kein Balkon, WG-Zimmer", "is_shared_flat"),
+])
+def test_listing_flags_negation_stops_at_punctuation(text, key):
+    from sources.base import listing_flags
+    assert listing_flags(text)[key] is True
