@@ -266,3 +266,24 @@ def test_old_database_without_street_column_still_opens(tmp_path):
     db.commit(); db.close()
     s = Store(tmp_path / "old.db")
     assert s.get(1).street == "" and s.get(1).postcode == "53111"
+
+
+def test_set_status_logs_transition_with_reason(store, caplog):
+    caplog.set_level("DEBUG", logger="wohnung")
+    i = store.add(L(title="Schöne 2-Zi"), 800)
+    store.set_status(i, "filtered", reason="Warmmiete 1100 > 900")
+    store.set_status(i, "filtered", reason="Warmmiete 1100 > 900")   # без изменений — без записи
+    lines = [r for r in caplog.records if "→" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].levelname == "DEBUG"
+    assert "seen → filtered (Warmmiete 1100 > 900) | Schöne 2-Zi" in lines[0].getMessage()
+
+
+def test_set_status_draft_and_sent_are_info(store, caplog):
+    caplog.set_level("DEBUG", logger="wohnung")
+    i = store.add(L(), 800)
+    store.set_status(i, "draft", letter="x")
+    store.set_status(i, "draft", draft_msg_id=5)   # служебное поле — не переход
+    store.set_status(i, "sent")
+    moves = [(r.levelname, r.getMessage()) for r in caplog.records if "→" in r.getMessage()]
+    assert [lv for lv, _ in moves] == ["INFO", "INFO"]
+    assert "seen → draft" in moves[0][1] and "draft → sent" in moves[1][1]

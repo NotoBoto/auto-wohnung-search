@@ -8,7 +8,10 @@
 import asyncio
 import dataclasses
 import logging
+import time
+from collections import Counter
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Protocol
 
 import core
@@ -31,6 +34,7 @@ NO_PROFILE = "профиль не заполнен"   # reason у строки s
 RECHECK_WINDOW = timedelta(hours=24)  # такие seen обрабатываем, когда профиль заполнен; столько же живёт повтор failed
 LOAD_FAILED = "объявление не загрузилось"   # начало reason у failed без сбоя письма — такие не повторяем
 BLOCKING_KINDS = ("captcha", "logged_out", "blocked", "broken")   # эти случаи держат площадку на паузе
+SNAPSHOTS_KEEP = 40   # сколько файлов снимков страниц (png + html) хранить в debug_dir
 
 
 class Paused(Exception):
@@ -65,8 +69,13 @@ def to_utc(local: datetime) -> datetime:
 
 class Engine:
     def __init__(self, cfg: dict, store: Store, ai, sources: dict, browser, notifier: Notifier,
-                 mail=None, clock=_utcnow):
+                 mail=None, clock=_utcnow, debug_dir: Path | None = None, only=None):
+        """only — запуск отдельных площадок (опрашиваются только они); None — все включённые в настройках."""
         self.cfg, self.store, self.ai, self.sources = cfg, store, ai, sources
+        self.selective = only is not None
+        self._extra: set[str] = set(only or ())   # площадки, запущенные по одной (опрашиваются и без «enabled»)
+        self._wake: dict[str, asyncio.Event] = {}   # площадка → «опросить сейчас», не дожидаясь интервала
+        self.debug_dir = debug_dir   # сюда — снимок страницы при сбое площадки; None — не снимать
         self.browser, self.notifier, self.mail = browser, notifier, mail
         self.clock = clock   # наивный UTC, как в Store
         for src in sources.values():
@@ -80,12 +89,33 @@ class Engine:
         self._login_prev: dict[str, bool] = {}   # была ли площадка на паузе до входа владельца
         self._paced: dict[str, bool] = {}   # идёт опрос площадки: грузили ли уже объявление (пауза перед следующим)
         self._recheck_lock = asyncio.Lock()   # profile_updated: один проход за раз
+        self._cap_logged: dict[str, str] = {}   # площадка → день, когда записали «дневной лимит исчерпан»
         self._stop = asyncio.Event()
 
     # ---------- настройки и состояние ----------
 
     def mode_for(self, platform: str) -> str:
         return (self.cfg["platforms"].get(platform) or {}).get("mode") or self.cfg["mode"]
+
+    def active(self, platform: str) -> bool:
+        """Площадка участвует в этом запуске: запущена по одной или (в общем запуске) включена в настройках.
+        Настройку читаем на ходу — переключатель в окне действует без перезапуска."""
+        if platform not in self.sources:
+            return False
+        if platform in self._extra:
+            return True
+        return not self.selective and bool((self.cfg["platforms"].get(platform) or {}).get("enabled"))
+
+    def activate(self, platform: str) -> None:
+        """Добавить площадку в идущий запуск и сразу опросить."""
+        self._extra.add(platform)
+        self.wake(platform)
+
+    def wake(self, platform: str) -> None:
+        """Цикл площадки проснётся сейчас: активная опросится, выключенная снова уснёт."""
+        ev = self._wake.get(platform)
+        if ev:
+            ev.set()
 
     def _paused_now(self, platform: str) -> bool:
         return self._paused_all or platform in self._paused
@@ -157,6 +187,25 @@ class Engine:
         self.pause(platform)
         log.warning("%s: %s — площадка на паузе (%s)", platform, kind, detail)
         await self._incident(platform, kind, detail)
+
+    async def _snapshot(self, platform: str, tag: str, page=None) -> None:
+        """Скриншот и HTML текущей страницы площадки в debug_dir — чтобы потом понять, что было на экране."""
+        if self.debug_dir is None:
+            return
+        try:
+            page = page or await self.browser.page(platform)
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+            base = self.debug_dir / f"{datetime.now():%Y%m%d-%H%M%S}-{platform}-{tag}"
+            log.info("%s: страница при сбое: %s — снимок debug/%s.png/.html", platform, page.url, base.name)
+            base.with_suffix(".html").write_text(await page.content(), encoding="utf-8")
+            await page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
+        except Exception as e:
+            log.debug("%s: снимок страницы не сделан: %s", platform, e)
+        try:
+            for old in sorted(self.debug_dir.iterdir())[:-SNAPSHOTS_KEEP]:
+                old.unlink()
+        except OSError:
+            pass
 
     # ---------- обработка объявления ----------
 
@@ -237,6 +286,7 @@ class Engine:
     async def _write_letter(self, id: int, l: Listing, warm_estimated: bool, wish: str = "",
                             force_draft: bool = False) -> str:
         profile = self.cfg["profile"]
+        t0 = time.monotonic()
         try:
             res = await generate_letter(self.ai, self._prompt(), l, profile, wish, self.store.recent_openings())
         except (LetterError, AIError) as e:
@@ -249,8 +299,11 @@ class Engine:
             return "failed"
         self.store.close_incidents("ai")
         if res.text is None:
+            log.info("%s #%s: нейросеть отказалась писать (%s)", l.platform, id, res.skip_reason or "SKIP")
             self.store.set_status(id, "filtered", reason=res.skip_reason or "SKIP")
             return "filtered"
+        log.info("%s #%s: письмо готово за %.0f с, %d симв.%s", l.platform, id, time.monotonic() - t0,
+                 len(res.text), f" (пожелание: {wish})" if wish else "")
         missing = [f for f in l.required_fields if profile.get(f) in (None, "")]
         if force_draft or missing or self.mode_for(l.platform) == "confirm":
             reason = f"нет полей: {', '.join(missing)}" if missing else ""
@@ -284,7 +337,14 @@ class Engine:
             if not self._sendable(row):
                 return
             wait = self._limiter(platform).wait_seconds(self.clock())
-            if wait is None or wait > 0:
+            if wait is None:
+                day = to_local(self.clock()).date().isoformat()
+                if self._cap_logged.get(platform) != day:   # одна запись в день, а не каждые SEND_EVERY сек
+                    self._cap_logged[platform] = day
+                    log.info("%s: дневной лимит %s писем исчерпан — очередь ждёт до полуночи",
+                             platform, self.cfg["platforms"][platform]["daily_cap"])
+                return
+            if wait > 0:
                 return
             if self.store.contact_count(row.contact_key, 7, ("sent", "sending"), exclude_id=id) >= self.cfg["contact_cap_7d"]:
                 self.store.set_status(id, "filtered", reason="лимит контакта")
@@ -293,6 +353,9 @@ class Engine:
             src = self.sources[platform]
             self.store.set_status(id, "sending")
             l = self._row_listing(row)
+            log.info("%s: отправляю #%s «%s» %s", platform, id, row.title, row.url)
+            t0 = time.monotonic()
+            page = None
             try:
                 page = await self.browser.page(platform)
                 await src.send(page, l, row.letter, self.cfg["profile"])
@@ -309,11 +372,13 @@ class Engine:
             except (NotSubmittedError, SourceBroken) as e:
                 # до нажатия «Отправить»: письмо точно не ушло — назад в очередь, площадка на паузе
                 self.store.set_status(id, "queued")
+                await self._snapshot(platform, f"send-{id}", page)
                 await self._block(platform, "broken", str(e))
             except Exception as e:
                 # после нажатия исход неизвестен (форма могла уйти): строка остаётся sending, решает владелец
                 # через resolve_stuck; площадка на паузе, иначе следующая строка застрянет так же
-                log.exception("%s: отправка #%s прервана", platform, id)
+                log.exception("%s: отправка #%s прервана через %.0f с", platform, id, time.monotonic() - t0)
+                await self._snapshot(platform, f"send-{id}", page)
                 if not self._paused_now(platform):
                     self._stuck_paused.add(platform)
                 self.pause(platform)
@@ -322,7 +387,7 @@ class Engine:
             else:
                 self.store.set_status(id, "sent", sent_at=self.clock())   # до снятия блокировки площадки
                 self.store.close_incidents(platform, "send")
-                log.info("%s: письмо #%s отправлено", platform, id)
+                log.info("%s: письмо #%s отправлено за %.0f с", platform, id, time.monotonic() - t0)
                 await self._safe(self.notifier.sent(self.store.get(id)))
 
     def _sendable(self, row: Row) -> bool:
@@ -342,7 +407,7 @@ class Engine:
         for row in rows:
             if row.platform in tried or row.reason == GENERATING or not row.letter:
                 continue
-            if row.platform not in self.sources or self._paused_now(row.platform):
+            if not self.active(row.platform) or self._paused_now(row.platform):
                 continue
             tried.add(row.platform)
             await self._send(row.id)
@@ -426,6 +491,7 @@ class Engine:
         src = self.sources.get(platform)
         if src is None or self._paused_now(platform):
             return
+        t0 = time.monotonic()
         try:
             async with self.browser.lock(platform):
                 if self._paused_now(platform):   # пауза пришла, пока ждали блокировку
@@ -435,33 +501,46 @@ class Engine:
             await self._block(platform, e.kind, str(e))
             return
         except SourceBroken as e:
+            await self._snapshot(platform, "search")
             await self._block(platform, "broken", str(e))
             return
         except Exception:
             log.exception("%s: поиск не удался", platform)
             return
         self._paced[platform] = False
+        counts: Counter = Counter()
         try:
-            await self._process_all(platform, listings)
+            await self._process_all(platform, listings, counts)
         finally:
             self._paced.pop(platform, None)
+            # «известные» — были в базе до опроса; остальные — чем закончилась обработка (filtered, draft, …)
+            done = ", ".join(f"{k} {v}" for k, v in counts.most_common())
+            log.info("%s: опрос за %.0f с — в выдаче %d%s", platform, time.monotonic() - t0, len(listings),
+                     f": {done}" if done else "")
 
-    async def _process_all(self, platform: str, listings: list[Listing]) -> None:
-        for l in listings:
-            if self._paused_now(platform):
+    async def _process_all(self, platform: str, listings: list[Listing], counts: Counter | None = None) -> None:
+        counts = Counter() if counts is None else counts
+        for i, l in enumerate(listings):
+            if self._paused_now(platform) or not self.active(platform):   # площадку выключили во время опроса
+                counts["пропущены (пауза)"] += len(listings) - i
                 break
+            known = self.store.has(l.platform, l.ext_id)
             try:
-                await self.process(platform, l)
+                status = await self.process(platform, l)
+                counts["известные" if known else status] += 1
             except Paused:
+                counts["пропущены (пауза)"] += len(listings) - i
                 break
             except BlockedError as e:
                 await self._block(platform, e.kind, str(e))
                 break
             except SourceBroken as e:
+                await self._snapshot(platform, f"detail-{l.ext_id}")
                 await self._block(platform, "broken", str(e))
                 break
             except Exception:
-                log.exception("%s: объявление %s не обработано", platform, l.ext_id)
+                counts["ошибка"] += 1
+                log.exception("%s: объявление %s не обработано (%s)", platform, l.ext_id, l.url)
 
     async def mail_once(self) -> None:
         if self.mail is None:
@@ -470,6 +549,9 @@ class Engine:
             row = self.store.match_reply(r.platform, r.ext_id, r.url, r.contact)
             if row:
                 self.store.add_reply(row.id, r.excerpt, r.link)
+                log.info("mail: ответ по %s #%s от %s | %s", row.platform, row.id, r.contact or "?", row.title)
+            else:
+                log.info("mail: ответ от %s (%s) — объявление не найдено", r.contact or "?", r.platform or "?")
             await self._safe(self.notifier.reply(row, r))
 
     async def maintenance_once(self) -> None:
@@ -592,27 +674,38 @@ class Engine:
         return poll_interval(to_local(self.clock()), tuple(p["poll"]), tuple(self.cfg["night_poll"]))
 
     async def _loop(self, name: str, once, delay) -> None:
+        wake = self._wake.get(name)
         while not self._stop.is_set():
+            if wake:
+                wake.clear()
             try:
                 await once()
             except Exception:
                 log.exception("цикл %s: сбой", name)
-            try:
-                await asyncio.wait_for(self._stop.wait(), delay())
-            except asyncio.TimeoutError:
-                pass
+            d = delay()
+            if self.active(name):
+                log.debug("%s: следующий опрос через %.0f с", name, d)
+            waits = [asyncio.ensure_future(self._stop.wait())] + ([asyncio.ensure_future(wake.wait())] if wake else [])
+            _, pending = await asyncio.wait(waits, timeout=d, return_when=asyncio.FIRST_COMPLETED)
+            for t in pending:
+                t.cancel()
+
+    async def _poll_if_active(self, platform: str) -> None:
+        if self.active(platform):
+            await self.poll_once(platform)   # с экземпляра: окно подменяет poll_once, чтобы запомнить время
 
     async def run(self) -> None:
         self._stop.clear()
         await self.startup()
         loops = []
+        # цикл у каждой поддерживаемой площадки: выключенная спит и оживает, когда её включат (wake)
         for p, pc in self.cfg["platforms"].items():
-            if not pc.get("enabled"):
-                continue
             if p not in self.sources:
-                log.info("%s: площадка ещё не поддерживается — пропущена", p)
+                if pc.get("enabled") and not self.selective:
+                    log.info("%s: площадка ещё не поддерживается — пропущена", p)
                 continue
-            loops.append(self._loop(p, lambda p=p: self.poll_once(p), lambda p=p: self._poll_delay(p)))
+            self._wake[p] = asyncio.Event()
+            loops.append(self._loop(p, lambda p=p: self._poll_if_active(p), lambda p=p: self._poll_delay(p)))
         loops.append(self._loop("send", self.send_queued_once, lambda: SEND_EVERY))
         if self.mail is not None:
             loops.append(self._loop("mail", self.mail_once, lambda: self.cfg["mail_poll_sec"]))
