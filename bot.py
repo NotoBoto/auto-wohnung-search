@@ -152,7 +152,7 @@ class OwnerBot:
 
     def __init__(self, cfg: dict, engine, store: Store):
         self.cfg, self.engine, self.store = cfg, engine, store
-        self.pending_edit: dict[int, int] = {}                # chat → id черновика, ждущего нового текста
+        self.pending_edit: dict[int, tuple[int, object]] = {}  # chat → (id черновика, его сообщение с кнопками)
         self.wizard: dict[int, list[str]] = {}                # chat → оставшиеся поля профиля
 
     # ---------- общее ----------
@@ -172,6 +172,19 @@ class OwnerBot:
     def _cancel_input(self, chat: int) -> None:
         self.pending_edit.pop(chat, None)
         self.wizard.pop(chat, None)
+
+    async def _close_keyboard(self, message, outcome: str) -> None:
+        """Убирает кнопки у сообщения и дописывает итог; если текст не меняется, хотя бы убирает кнопки."""
+        if message is None:
+            return
+        try:
+            await message.edit_text(f"{message.text or ''}\n\n{outcome}"[:MAX_LEN], reply_markup=None)
+        except TelegramError as e:
+            log.warning("не удалось обновить сообщение: %s", _scrub(str(e), self.cfg.get("bot_token", "")))
+            try:
+                await message.edit_reply_markup(reply_markup=None)
+            except TelegramError as e2:
+                log.warning("не удалось убрать кнопки: %s", _scrub(str(e2), self.cfg.get("bot_token", "")))
 
     async def _profile_changed(self) -> None:
         self._save()
@@ -305,7 +318,8 @@ class OwnerBot:
             await self._say(update, "Нет такого поля. Есть: " + ", ".join(_STEP_FIELDS))
             return
         if len(args) > 1:   # /profile persons 3
-            await self._store_answer(update, args[0], " ".join(args[1:]), [])
+            if not await self._store_answer(update, args[0], " ".join(args[1:]), []):
+                self.wizard[chat] = [args[0]]   # следующий текст — новая попытка
             return
         self.wizard[chat] = [args[0]]
         await self._say(update, _QUESTIONS[args[0]])
@@ -351,14 +365,17 @@ class OwnerBot:
             return
         chat, text = update.effective_chat.id, (update.effective_message.text or "").strip()
         if chat in self.pending_edit:
-            id = self.pending_edit.pop(chat)
+            id, draft_msg = self.pending_edit.pop(chat)
             try:
                 if text.startswith("!"):
                     await self.engine.regenerate(id, text[1:].strip())
                     await self._say(update, "Готовлю новый вариант.")
+                    await self._close_keyboard(draft_msg, "↻ Готовлю новый вариант")
                 else:
                     await self.engine.approve(id, text)
-                    await self._say(update, self._approve_outcome(id))
+                    outcome = self._approve_outcome(id)
+                    await self._say(update, outcome)
+                    await self._close_keyboard(draft_msg, outcome)
             except Exception as e:
                 log.exception("правка черновика #%s", id)
                 await self._say(update, f"Ошибка: {type(e).__name__}")
@@ -373,6 +390,13 @@ class OwnerBot:
         status = self.store.get(id).status
         return {"sent": "✓ Отправлено", "queued": "✓ В очереди на отправку",
                 "sending": "✓ Отправляется"}.get(status, f"Не отправлено (статус: {status})")
+
+    def _dup_outcome(self, id: int) -> str:
+        status = self.store.get(id).status
+        return {"queued": "✓ В очереди на отправку", "sending": "✓ Отправляется", "sent": "✓ Отправлено",
+                "draft": "✓ Черновик создан, смотрите ниже", "filtered": "Не прошло фильтры",
+                "seen": "Ждёт заполнения профиля", "failed": "Не удалось обработать"
+                }.get(status, f"Статус: {status}")
 
     def _skip_outcome(self, id: int) -> str:
         status = self.store.get(id).status
@@ -392,10 +416,7 @@ class OwnerBot:
             await self._say(update, f"Ошибка: {type(e).__name__}")
             return
         if outcome is not None:   # сообщение теряет кнопки, чтобы их нельзя было нажать дважды
-            try:
-                await q.edit_message_text(f"{q.message.text or ''}\n\n{outcome}", reply_markup=None)
-            except TelegramError as e:
-                log.warning("не удалось обновить сообщение: %s", _scrub(str(e), self.cfg.get("bot_token", "")))
+            await self._close_keyboard(q.message, outcome)
 
     async def _dispatch(self, update: Update, kind: str, id: int, arg: str) -> str | None:
         """Выполняет действие кнопки; возвращает итог для сообщения или None (кнопки остаются)."""
@@ -408,7 +429,7 @@ class OwnerBot:
                 return "Уже обработано"
             chat = update.effective_chat.id
             self.wizard.pop(chat, None)
-            self.pending_edit[chat] = id
+            self.pending_edit[chat] = (id, update.callback_query.message)
             await self._say(update, "Пришлите новый текст сообщением. Если начать с «!», это пожелание для нового "
                                     "варианта («!короче»). /cancel — отмена.")
             return None
@@ -421,7 +442,7 @@ class OwnerBot:
         if kind == "dup":
             if arg == "send":
                 await e.resolve_duplicate(id, True)
-                return "✓ Отправляю: " + self.store.get(id).status
+                return self._dup_outcome(id)
             await e.resolve_duplicate(id, False)
             return "Пропущено"
         if kind == "stuck":

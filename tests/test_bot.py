@@ -167,12 +167,25 @@ class Msg:
     async def reply_text(self, t): self.replies.append(t)
 
 
+class Message:
+    def __init__(self, text, q):
+        self.text, self.q = text, q
+
+    async def edit_text(self, text, reply_markup=None):
+        if self.q.fail_text:
+            raise BadRequest("too long")
+        self.q.edits.append((text, reply_markup))
+
+    async def edit_reply_markup(self, reply_markup=None):
+        self.q.markup_only += 1
+
+
 class Query:
-    def __init__(self, data, text="draft text"):
-        self.data, self.message, self.edits, self.answered = data, SimpleNamespace(text=text), [], False
+    def __init__(self, data, text="draft text", fail_text=False):
+        self.data, self.edits, self.answered, self.fail_text, self.markup_only = data, [], False, fail_text, 0
+        self.message = Message(text, self)
 
     async def answer(self): self.answered = True
-    async def edit_message_text(self, text, reply_markup=None): self.edits.append((text, reply_markup))
 
 
 def upd(chat, text="", query=None, reply_to=None):
@@ -263,15 +276,19 @@ async def test_button_error_replies_short(env):
 async def test_edit_flow_plain_text_approves(env):
     q = Query(f"edit:{env.id}")
     await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
-    assert env.bot.pending_edit == {OWNER: env.id} and q.edits == []   # кнопки остаются до итога
+    assert env.bot.pending_edit == {OWNER: (env.id, q.message)} and q.edits == []   # кнопки остаются до итога
     await env.bot.on_text(upd(OWNER, "Neuer Text")[0], ctx())
     assert env.engine.calls == [("approve", env.id, "Neuer Text")] and env.bot.pending_edit == {}
+    text, markup = q.edits[0]   # исходный черновик потерял кнопки
+    assert markup is None and text.startswith("draft text") and "очереди" in text
 
 
 async def test_edit_flow_bang_regenerates_and_cancel(env):
-    await env.bot.on_callback(upd(OWNER, query=Query(f"edit:{env.id}"))[0], ctx())
+    q = Query(f"edit:{env.id}")
+    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
     await env.bot.on_text(upd(OWNER, "!короче")[0], ctx())
     assert env.engine.calls == [("regenerate", env.id, "короче")]
+    assert q.edits[0][1] is None and "новый вариант" in q.edits[0][0]
     await env.bot.on_callback(upd(OWNER, query=Query(f"edit:{env.id}"))[0], ctx())
     await env.bot.cmd_cancel(upd(OWNER)[0], ctx())
     await env.bot.on_text(upd(OWNER, "ignored")[0], ctx())
@@ -359,3 +376,31 @@ async def test_prompt_show_and_replace(env, tmp_path):
     u, m = upd(OWNER, reply_to=SimpleNamespace(text="neu"))
     await env.bot.cmd_prompt(u, ctx())
     assert (tmp_path / env.cfg["prompt_file"]).read_text(encoding="utf-8") == "neu"
+
+
+async def test_edit_text_failure_falls_back_to_removing_markup(env):
+    q = Query(f"send:{env.id}", fail_text=True)
+    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
+    assert q.edits == [] and q.markup_only == 1
+
+
+async def test_callback_without_message_does_not_crash(env):
+    q = Query(f"skip:{env.id}")
+    q.message = None
+    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
+    assert env.engine.calls == [("skip", env.id)]
+
+
+async def test_profile_bad_inline_value_keeps_field_pending(env):
+    u, m = upd(OWNER)
+    await env.bot.cmd_profile(u, ctx("persons", "abc"))
+    assert env.bot.wizard == {OWNER: ["persons"]} and env.cfg["profile"] == {}
+    await env.bot.on_text(upd(OWNER, "3")[0], ctx())
+    assert env.cfg["profile"]["persons"] == 3
+
+
+async def test_dup_send_outcome_is_readable(env):
+    env.store.set_status(env.id, "queued")
+    q = Query(f"dup:{env.id}:send")
+    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
+    assert "очереди" in q.edits[0][0] and "queued" not in q.edits[0][0]
