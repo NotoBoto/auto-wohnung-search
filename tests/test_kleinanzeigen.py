@@ -84,6 +84,15 @@ def test_detect_block_captcha_and_ok():
     assert Kleinanzeigen.detect_block(read("kleinanzeigen/detail.html"), "https://www.kleinanzeigen.de/s-anzeige/x") is None
 
 
+def test_detect_block_ip_range_ban():
+    page = ("<html><head><title>IP-Bereich gesperrt bei Kleinanzeigen</title></head><body>"
+            "<h1>IP-Bereich vorübergehend gesperrt.</h1>"
+            "<p>In deinem IP-Bereich kam es vor Kurzem mehrfach zu unsicheren Versuchen, unsere Plattform zu verwenden.</p>"
+            "<a href='https://themen.kleinanzeigen.de/ip-eingeschraenkt/'>Mehr Informationen</a>"
+            "<p>Ref#: 0.d96656b8 IP#: 0.0.0.0</p>" + " " * 4000 + "</body></html>")
+    assert Kleinanzeigen.detect_block(page, "https://www.kleinanzeigen.de/s-x") == "blocked"
+
+
 def test_search_url():
     u = Kleinanzeigen().search_url({"max_warm": 900, "min_rooms": 2})
     assert u.startswith("https://www.kleinanzeigen.de/s-wohnung-mieten/bonn/") and "preis::900" in u and "c203l1038" in u

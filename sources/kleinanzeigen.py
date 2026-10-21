@@ -16,6 +16,8 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _PLZ_RE = re.compile(r"\b(\d{5})\b\s*(?:Bonn\s*-\s*)?(.*)")
 _EMPTY_RE = re.compile(r"srchrslt-noresult|keine\s+(?:Anzeigen|Ergebnisse|Treffer)\s+gefunden", re.I)   # маркер пустой выдачи: не проверено вживую
 _BLOCK_RE = re.compile(r"geetest|captcha|Zugriff verweigert|Access Denied", re.I)
+# Временная блокировка диапазона IP («IP-Bereich vorübergehend gesperrt») — не капча, её не решить
+_IP_BAN_RE = re.compile(r"IP-Bereich[^<]{0,40}gesperrt|ip-eingeschraenkt", re.I)
 _NORMAL_MARKERS = ('id="viewad-title"', "srchrslt", "data-adid=")
 _LOGIN_BUTTON = "[data-testid='login-button']"   # «Einloggen» в шапке — пользователь не вошёл (не проверено вживую)
 
@@ -135,6 +137,8 @@ class Kleinanzeigen(Source):
         if "m-einloggen" in url:
             return "logged_out"
         if not any(m in html for m in _NORMAL_MARKERS):
+            if _IP_BAN_RE.search(html):
+                return "blocked"
             if _BLOCK_RE.search(html):
                 return "captcha"
             if len(html) < 3000 and re.search(r"\b(403|429)\b", html):
