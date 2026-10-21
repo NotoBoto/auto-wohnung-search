@@ -165,6 +165,14 @@ def test_detect_block_ignores_captcha_input_attribute():
     assert WgGesucht.detect_block(html, "https://www.wg-gesucht.de/x") is None
 
 
+def test_detect_block_ignores_invisible_recaptcha_on_normal_page():
+    # обычная главная после входа: невидимая reCAPTCHA и список доменов cookie-баннера — не проверка
+    html = ('<script>window.cmp_block_ignoredomains = ["recaptcha.net", "meineschufa.de"];</script>'
+            '<div id="main_column">Willkommen</div>'
+            '<iframe src="https://www.google.com/recaptcha/api2/aframe" width="0" height="0"></iframe>')
+    assert WgGesucht.detect_block(html, "https://www.wg-gesucht.de/") is None
+
+
 async def test_is_logged_in_captcha_raises():
     class P:
         url = "https://www.wg-gesucht.de/"
