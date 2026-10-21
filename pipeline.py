@@ -68,6 +68,7 @@ class Engine:
         self._listings: dict[int, Listing] = {}      # подробности объявления для отправки и перегенерации
         self._draft_at: dict[int, datetime] = {}     # когда показан черновик (для draft_ttl_hours)
         self._asked_stuck: set[int] = set()
+        self._recheck_lock = asyncio.Lock()   # profile_updated: один проход за раз
         self._stop = asyncio.Event()
 
     # ---------- настройки и состояние ----------
@@ -334,10 +335,13 @@ class Engine:
         await self._continue(id, l)
 
     async def resolve_stuck(self, id: int, was_sent: bool) -> None:
-        if self.store.get(id).status != "sending":
+        row = self.store.get(id)
+        if row.status != "sending":
             return
+        self._asked_stuck.discard(id)   # новый неясный сбой этой строки — снова вопрос
         if was_sent:
             self.store.set_status(id, "sent", sent_at=self.clock())
+            self.store.close_incidents(row.platform, "send")
         else:
             self.store.set_status(id, "queued")
 
@@ -409,15 +413,21 @@ class Engine:
 
     async def profile_updated(self) -> None:
         """Профиль заполнен: объявления, отложенные за последние 24 ч, один раз проходят конвейер."""
-        if not profile_complete(self.cfg["profile"]):
-            return
+        if not profile_complete(self.cfg["profile"]) or self._recheck_lock.locked():
+            return   # уже идёт (цикл обслуживания или бот) — второй проход не нужен
+        async with self._recheck_lock:
+            await self._profile_updated()
+
+    async def _profile_updated(self) -> None:
         since = self.clock() - RECHECK_WINDOW
-        for row in self.store.by_status("seen"):
-            if row.reason != NO_PROFILE or row.created_at < since or self._paused_now(row.platform):
+        for snap in self.store.by_status("seen"):
+            row = self.store.get(snap.id)   # список устарел, пока шли await — проверяем строку заново
+            if (row.status != "seen" or row.reason != NO_PROFILE or row.created_at < since
+                    or self._paused_now(row.platform)):
                 continue
             if row.id not in self._listings and row.platform not in self.sources:
                 continue
-            self.store.set_status(row.id, "seen", reason="")   # один раз, даже если дальше сбой
+            self.store.set_status(row.id, "seen", reason="")   # забрали: один раз, даже если дальше сбой
             try:
                 l = self._listings.get(row.id) or await self._detail(row.platform, self._row_listing(row))
             except BlockedError as e:
@@ -434,10 +444,17 @@ class Engine:
 
     async def _recheck(self, id: int, l: Listing) -> str:
         """Дедупликация уже записанной строки и резерв — как шаг 3 в process(), без await до резерва."""
+        row = self.store.get(id)
+        if row.status != "seen":   # строку уже обработал другой вызов — не трогаем
+            return row.status
         warm = estimate_warm(l)[0]
-        # find_dedup сначала находит саму строку по (platform, ext_id) — ищем по адресу с подменённым ext_id
+        # find_dedup сначала находит саму строку по (platform, ext_id) — ищем по адресу с подменённым ext_id;
+        # сама строка в seen не блокирующая, поэтому совпасть с собой не может
         probe = dataclasses.replace(l, ext_id=l.ext_id + "#recheck")
         d = self.store.find_dedup(probe, warm, self.cfg["dedup_days"])
+        if d.match_id == id:   # на всякий случай: совпадение с собой — не дубль
+            log.error("recheck #%s совпал сам с собой — пропущен", id)
+            return row.status
         if d.kind == "exact":
             self.store.set_status(id, "duplicate", reason=f"как #{d.match_id}")
             return "duplicate"

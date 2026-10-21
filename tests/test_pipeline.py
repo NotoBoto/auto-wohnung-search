@@ -283,6 +283,19 @@ async def test_restart_with_sending_asks_and_does_not_resend():
     assert env.store.get(j).status == "queued"
 
 
+async def test_stuck_again_after_resolve_asks_again():
+    env = Env(mode="auto")
+    await env.engine.process("kleinanzeigen", L())
+    env.ka.send_exc = RuntimeError("сбой")
+    await env.engine.send_queued_once()
+    await env.engine.resolve_stuck(1, was_sent=False)
+    env.clock.now += timedelta(minutes=5)
+    await env.engine.send_queued_once()
+    assert env.store.get(1).status == "sending" and len(env.notifier.names("ask_stuck")) == 2
+    await env.engine.resolve_stuck(1, was_sent=True)
+    assert env.store.get(1).status == "sent" and env.store.open_incidents() == []
+
+
 async def test_never_sends_row_without_letter_or_generating():
     env = Env(mode="auto")
     i = env.store.add(L(), 800)
@@ -517,6 +530,26 @@ async def test_seen_rows_processed_once_after_profile_filled():
     assert st[4] == "draft" and st[1] == "seen"
     assert sorted([st[2], st[3]]) == ["draft", "duplicate"]   # одна квартира — одно письмо
     assert len(env.ai.calls) == 2 and len(env.notifier.names("draft")) == 2
+
+
+async def test_profile_updated_concurrent_calls_one_letter_per_row():
+    env = Env(mode="confirm", profile={})
+    await env.engine.process("kleinanzeigen", L())
+    await env.engine.process("kleinanzeigen", L(ext_id="2", street="Andere Str. 1", contact_name="Frau Weber"))
+    env.cfg["profile"].update(PROFILE)
+    await asyncio.gather(env.engine.profile_updated(), env.engine.profile_updated(), env.engine.maintenance_once())
+    assert [env.store.get(i).status for i in (1, 2)] == ["draft", "draft"]
+    assert len(env.ai.calls) == 2 and len(env.notifier.names("draft")) == 2
+
+
+async def test_profile_updated_recheck_never_matches_itself():
+    env = Env(mode="confirm", profile={})
+    await env.engine.process("kleinanzeigen", L())
+    env.cfg["profile"].update(PROFILE)
+    env.store.set_status(1, "queued", reason="generating")   # строку уже зарезервировал другой вызов
+    assert await env.engine._recheck(1, env.engine._listings[1]) == "queued"
+    row = env.store.get(1)
+    assert (row.status, row.reason) == ("queued", "generating") and env.ai.calls == []
 
 
 async def test_missing_profile_throttle_survives_restart():
