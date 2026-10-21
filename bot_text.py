@@ -21,6 +21,11 @@ def format_draft(row, text: str, warm_estimated: bool) -> str:
     return "\n".join(x for x in head if x) + "\n\n" + text
 
 
+def format_done(row, mark: str) -> str:
+    """Черновик после решения: одна строка-итог со ссылкой вместо полного письма."""
+    return f"{mark} · #{row.id} · {row.platform} · {row.title}\n{row.url}"
+
+
 def format_reply(row, r) -> str:
     if row is None:
         head = ["Ответ пришёл, но я не нашёл, к какому объявлению.", f"Площадка: {r.platform}"]

@@ -28,6 +28,9 @@ class FakeBot:
     async def delete_message(self, **kw):
         self.deleted.append(kw)
 
+    async def edit_message_text(self, **kw):
+        self.edited = getattr(self, "edited", []) + [kw]
+
 
 def make_store(tmp_path):
     s = Store(tmp_path / "t.db")
@@ -162,9 +165,15 @@ class FakeEngine:
 
 class Msg:
     def __init__(self, text="", reply_to=None):
-        self.text, self.reply_to_message, self.replies = text, reply_to, []
+        self.text, self.reply_to_message, self.replies, self.deleted, self.sent_msgs = text, reply_to, [], False, []
 
-    async def reply_text(self, t): self.replies.append(t)
+    async def reply_text(self, t):
+        self.replies.append(t)
+        m = Msg(t)
+        self.sent_msgs.append(m)
+        return m
+
+    async def delete(self): self.deleted = True
 
 
 class Message:
@@ -245,14 +254,16 @@ async def test_send_button_approves_and_removes_keyboard(env):
     u, _ = upd(OWNER, query=q)
     await env.bot.on_callback(u, ctx())
     assert env.engine.calls == [("approve", env.id, None)] and q.answered
-    text, markup = q.edits[0]
-    assert markup is None and text.startswith("draft text") and "очереди" in text
+    text, markup = q.edits[0]   # черновик свёрнут в одну строку-итог
+    assert markup is None and "draft text" not in text and "Titel" in text and f"#{env.id}" in text
+    assert "очереди" in text or "Отправл" in text
 
 
 async def test_skip_button(env):
     q = Query(f"skip:{env.id}")
     await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
     assert env.engine.calls == [("skip", env.id)] and "Пропущено" in q.edits[0][0] and q.edits[0][1] is None
+    assert "draft text" not in q.edits[0][0]
 
 
 @pytest.mark.parametrize("data,expected", [
@@ -275,20 +286,28 @@ async def test_button_error_replies_short(env):
 
 async def test_edit_flow_plain_text_approves(env):
     q = Query(f"edit:{env.id}")
-    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
-    assert env.bot.pending_edit == {OWNER: (env.id, q.message)} and q.edits == []   # кнопки остаются до итога
-    await env.bot.on_text(upd(OWNER, "Neuer Text")[0], ctx())
+    u, m = upd(OWNER, query=q)
+    await env.bot.on_callback(u, ctx())
+    prompt = m.sent_msgs[0]
+    assert env.bot.pending_edit[OWNER][:2] == (env.id, q.message) and q.edits == []   # кнопки остаются до итога
+    u2, answer = upd(OWNER, "Neuer Text")
+    await env.bot.on_text(u2, ctx())
     assert env.engine.calls == [("approve", env.id, "Neuer Text")] and env.bot.pending_edit == {}
-    text, markup = q.edits[0]   # исходный черновик потерял кнопки
-    assert markup is None and text.startswith("draft text") and "очереди" in text
+    text, markup = q.edits[0]   # исходный черновик свёрнут в строку-итог
+    assert markup is None and "draft text" not in text and "очереди" in text
+    # подсказка бота и ответ владельца удалены, лишних ответов нет
+    assert prompt.deleted and answer.deleted and answer.replies == []
 
 
 async def test_edit_flow_bang_regenerates_and_cancel(env):
     q = Query(f"edit:{env.id}")
-    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
-    await env.bot.on_text(upd(OWNER, "!короче")[0], ctx())
+    u, m = upd(OWNER, query=q)
+    await env.bot.on_callback(u, ctx())
+    u2, answer = upd(OWNER, "!короче")
+    await env.bot.on_text(u2, ctx())
     assert env.engine.calls == [("regenerate", env.id, "короче")]
     assert q.edits[0][1] is None and "новый вариант" in q.edits[0][0]
+    assert answer.replies == [] and answer.deleted and m.sent_msgs[0].deleted   # без «Готовлю новый вариант.»
     await env.bot.on_callback(upd(OWNER, query=Query(f"edit:{env.id}"))[0], ctx())
     await env.bot.cmd_cancel(upd(OWNER)[0], ctx())
     await env.bot.on_text(upd(OWNER, "ignored")[0], ctx())
@@ -404,3 +423,33 @@ async def test_dup_send_outcome_is_readable(env):
     q = Query(f"dup:{env.id}:send")
     await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
     assert "очереди" in q.edits[0][0] and "queued" not in q.edits[0][0]
+
+
+async def test_new_draft_replaces_old_draft_message(tmp_path):
+    store, id = make_store(tmp_path)
+    store.set_status(id, "draft", draft_msg_id=555)
+    bot = FakeBot()
+    await notifier(bot).draft(store.get(id), "Neu", False)
+    assert bot.deleted == [{"chat_id": OWNER, "message_id": 555}] and len(bot.sent) == 1
+
+
+async def test_sent_collapses_draft_to_one_line(tmp_path):
+    store, id = make_store(tmp_path)
+    store.set_status(id, "sent", draft_msg_id=555)
+    bot = FakeBot()
+    n = notifier(bot)
+    await n.sent(store.get(id))
+    await n.drain()
+    await n.stop()
+    (e,) = bot.edited
+    assert e["message_id"] == 555 and "Отправлено" in e["text"] and "Titel" in e["text"] and "Hallo" not in e["text"]
+
+
+async def test_sent_without_draft_message_sends_nothing(tmp_path):
+    store, id = make_store(tmp_path)
+    bot = FakeBot()
+    n = notifier(bot)
+    await n.sent(store.get(id))   # авто-режим: черновика не было — отдельного сообщения нет
+    await n.drain()
+    await n.stop()
+    assert bot.sent == [] and not getattr(bot, "edited", [])

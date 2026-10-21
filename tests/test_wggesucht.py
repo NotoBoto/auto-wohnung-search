@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from models import Listing
-from sources.base import BlockedError, SourceBroken
+from sources.base import AlreadyContactedError, BlockedError, SourceBroken
 from sources.wggesucht import WgGesucht, months_between
 
 FIX = Path(__file__).parent / "fixtures"
@@ -184,7 +184,7 @@ async def test_is_logged_in_captcha_raises():
 # ---------- send (поддельная страница) ----------
 
 from fake_page import FakePage, fast_type, no_wait   # noqa: E402
-from sources.base import NotSubmittedError   # noqa: E402
+from sources.base import AlreadyContactedError, NotSubmittedError   # noqa: E402
 
 WG_FORM = ("textarea#message_input", "button:has-text('Nachricht senden')")
 
@@ -199,7 +199,7 @@ def fast(monkeypatch):
 async def test_send_ok(fast):
     page = FakePage(WG_FORM)
     await WgGesucht().send(page, Listing("wggesucht", "14258763", URL), "Hallo", {})
-    assert page.typed == "Hallo" and page.submitted and "/nachricht-senden/" in page.url
+    assert page.typed == "Hallo" and page.submitted and "nachrichten-id=" in page.url   # перешли в переписку
 
 
 async def test_send_form_missing_is_not_submitted(fast):
@@ -214,3 +214,34 @@ async def test_send_unconfirmed_after_click_is_not_not_submitted(fast):
     with pytest.raises(RuntimeError) as e:
         await WgGesucht().send(page, Listing("wggesucht", "14258763", URL), "Hallo", {})
     assert not isinstance(e.value, (NotSubmittedError, SourceBroken)) and page.submitted
+
+
+# --- после отправки WG-Gesucht открывает переписку nachricht.html?nachrichten-id=… («Unterhaltung mit …») ---
+
+CONV_URL = "https://www.wg-gesucht.de/nachricht.html?nachrichten-id=630564168"
+
+
+def test_is_conversation():
+    assert WgGesucht.is_conversation(CONV_URL, "")
+    assert WgGesucht.is_conversation("https://www.wg-gesucht.de/x", "<h3>Unterhaltung mit Max Mustermann</h3>")
+    assert not WgGesucht.is_conversation(
+        "https://www.wg-gesucht.de/nachricht-senden/wohnungen-in-Bonn.1.html", '<textarea id="message_input"></textarea>')
+
+
+class ConvPage:
+    """Форма сообщения для объявления, где переписка уже есть: сайт сразу ведёт в чат."""
+    url = CONV_URL
+
+    async def goto(self, url): pass
+    async def wait_for_load_state(self, *a, **k): pass
+    async def content(self): return "<h3>Unterhaltung mit Max Mustermann</h3><textarea id='message_input'></textarea>"
+    def locator(self, sel): raise AssertionError("в чат печатать нельзя")
+    def get_by_role(self, *a, **k): raise AssertionError("в чат печатать нельзя")
+
+
+async def test_send_never_types_into_existing_conversation(monkeypatch):
+    import sources.wggesucht as w
+    async def no_consent(page): pass
+    monkeypatch.setattr(w, "accept_consent", no_consent)
+    with pytest.raises(AlreadyContactedError):
+        await WgGesucht().send(ConvPage(), Listing("wggesucht", "14245195", URL), "Hallo", {})

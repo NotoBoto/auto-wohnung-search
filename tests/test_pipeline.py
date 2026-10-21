@@ -92,6 +92,9 @@ class FakeNotifier:
     async def ask_stuck(self, row):
         self.calls.append(("ask_stuck", row.id))
 
+    async def sent(self, row):
+        self.calls.append(("sent", row.id))
+
     async def reply(self, row, r):
         self.calls.append(("reply", row.id if row else None, r))
 
@@ -179,7 +182,8 @@ async def test_auto_mode_sends_and_no_per_send_notification():
     await env.engine.send_queued_once()
     row = env.store.by_status("sent")[0]
     assert env.ka.sent == [("1", row.letter)] and row.sent_at == T0
-    assert not env.notifier.names("draft") and env.notifier.calls == []
+    # только отметка «отправлено» (в Telegram без черновика ничего не приходит)
+    assert not env.notifier.names("draft") and env.notifier.calls == [("sent", row.id)]
 
 
 async def test_confirm_mode_creates_draft(eng):
@@ -529,8 +533,8 @@ async def test_send_error_keeps_sending_and_asks_owner():
     # исход неизвестен (форма могла уйти): не failed, а вопрос владельцу
     assert env.store.get(1).status == "sending" and env.store.by_status("failed") == []
     assert env.notifier.names("ask_stuck") == [("ask_stuck", 1)]
-    assert env.notifier.names("incident") == [("incident", "kleinanzeigen", "send")]
-    assert "kleinanzeigen" in env.engine.status()["paused"]   # исход неизвестен — площадку не трогаем
+    assert env.notifier.names("incident") == []   # один вопрос вместо двух сообщений
+    assert "kleinanzeigen" in env.engine.status()["paused"]
     await env.engine.regenerate(1)
     await env.engine.send_queued_once()
     await env.engine.startup()   # тот же сеанс: повторно не спрашиваем
@@ -577,7 +581,9 @@ async def test_unknown_send_error_pauses_platform_one_stuck_row():
         env.clock.now += timedelta(seconds=10)
     assert calls == ["0"] and "kleinanzeigen" in env.engine.status()["paused"]
     assert len(env.store.by_status("sending")) == 1 and len(env.store.by_status("queued")) == 4
-    assert sorted(c[0] for c in env.notifier.calls) == ["ask_stuck", "incident"]
+    # один вопрос «дошло ли?», без отдельного сообщения о сбое (чат не засоряется)
+    assert [c[0] for c in env.notifier.calls] == ["ask_stuck"]
+    assert ("kleinanzeigen", "send") in env.store.open_incidents()
 
 
 async def test_resolve_stuck_lifts_only_its_own_pause():
@@ -889,3 +895,31 @@ async def test_platform_without_source_is_skipped():
     await env.engine.stop()
     await asyncio.wait_for(task, 1)
     assert env.ka.searches == 1 and env.ka.filters is env.cfg["filters"]
+
+
+async def test_successful_send_notifies_sent_once():
+    env = Env(mode="auto")
+    five_queued(env)
+    await env.engine.send_queued_once()
+    assert env.store.get(1).status == "sent" and env.notifier.names("sent") == [("sent", 1)]
+
+
+async def test_already_contacted_marks_sent_without_typing():
+    from sources.base import AlreadyContactedError
+    env = Env(mode="auto")
+    five_queued(env)
+    env.ka.send_exc = AlreadyContactedError("переписка уже есть")
+    await env.engine.send_queued_once()
+    row = env.store.get(1)
+    assert row.status == "sent" and "переписка" in row.reason
+    assert env.notifier.names("sent") == [("sent", 1)] and env.notifier.names("ask_stuck") == []
+    assert env.engine.status()["paused"] == []
+
+
+async def test_resolve_stuck_sent_notifies_sent():
+    env = Env(mode="auto")
+    five_queued(env)
+    env.ka.send_exc = RuntimeError("после нажатия")
+    await env.engine.send_queued_once()
+    await env.engine.resolve_stuck(1, was_sent=True)
+    assert env.notifier.names("sent") == [("sent", 1)]

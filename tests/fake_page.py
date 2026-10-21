@@ -76,6 +76,14 @@ class FakePage:
     def get_by_text(self, pattern) -> FakeLocator:
         return FakeLocator(self, "__confirm__")
 
+    async def wait_for_url(self, pattern, timeout=None):
+        """После успешной отправки сайт переводит на страницу переписки (WG-Gesucht)."""
+        if not (self.confirm and self.submitted):
+            raise TimeoutError("переход не случился")
+        self.url = "https://www.wg-gesucht.de/nachricht.html?nachrichten-id=1"
+        if not pattern.search(self.url):
+            raise TimeoutError("не тот адрес")
+
 
 async def no_wait(*a, **kw):
     pass
