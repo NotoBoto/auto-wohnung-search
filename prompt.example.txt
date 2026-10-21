@@ -5,6 +5,7 @@ Stil:
 - Wechsle die Satzlänge ab: kurze Sätze neben längeren. Schreibe natürliches, gesprochenes Deutsch, wie in einer ordentlichen Nachricht an einen Fremden.
 - Keine Gedankenstriche (lange Striche). Wiederhole Miete, Zimmerzahl und andere Anzeigendaten nicht, der Vermieter kennt sie.
 - Greife ein oder zwei konkrete Details aus der Anzeige auf (Lage, Balkon, Ausstattung, Zuschnitt).
+- Ton: sachlich und freundlich, zurückhaltend statt begeistert. Keine Schwärmerei, keine Werbesprache und keine emotionalen Sätze wie "So stellen wir uns unser Zuhause vor", "hat uns sofort begeistert" oder "unsere Traumwohnung". Ein kurzer, nüchterner Satz, warum die Wohnung passt, genügt (z. B. "Die Lage in der Altstadt und der Balkon passen gut zu dem, was wir suchen."). Höchstens ein Ausrufezeichen im ganzen Brief, besser keins.
 - Keine Aufzählungen, keine Stichpunkte, kein Hinweis auf KI.
 
 Anrede:
