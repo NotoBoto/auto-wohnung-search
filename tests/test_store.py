@@ -242,3 +242,27 @@ def test_close_incidents_by_kind(store):
     assert store.open_incidents() == [("kleinanzeigen", "captcha")]
     store.close_incidents("kleinanzeigen")
     assert store.open_incidents() == []
+
+
+def test_street_stored_and_returned(tmp_path):
+    s = Store(tmp_path / "s.db")
+    id = s.add(Listing("wggesucht", "1", "u", "T", street="Musterstraße 12", postcode="53111", district="Altstadt"), 800)
+    r = s.get(id)
+    assert (r.street, r.postcode, r.district) == ("Musterstraße 12", "53111", "Altstadt")
+
+
+def test_old_database_without_street_column_still_opens(tmp_path):
+    import sqlite3
+    db = sqlite3.connect(tmp_path / "old.db")
+    db.executescript("""CREATE TABLE listings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, ext_id TEXT NOT NULL,
+        url TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'seen',
+        letter TEXT NOT NULL DEFAULT '', warm REAL, contact_key TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, sent_at TEXT, reason TEXT NOT NULL DEFAULT '', draft_msg_id INTEGER,
+        addr_key TEXT NOT NULL DEFAULT '', has_street INTEGER NOT NULL DEFAULT 0,
+        postcode TEXT NOT NULL DEFAULT '', district TEXT NOT NULL DEFAULT '',
+        rooms REAL, area REAL, UNIQUE (platform, ext_id));
+        INSERT INTO listings (platform, ext_id, created_at, postcode) VALUES ('wggesucht', '9', '2026-10-21T10:00:00.000000', '53111');""")
+    db.commit(); db.close()
+    s = Store(tmp_path / "old.db")
+    assert s.get(1).street == "" and s.get(1).postcode == "53111"

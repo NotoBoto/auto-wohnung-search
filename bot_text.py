@@ -3,6 +3,7 @@
 """
 import re
 from typing import Any
+from urllib.parse import quote_plus
 
 from models import PROFILE_FIELDS
 
@@ -13,9 +14,23 @@ def _money(v: float | None) -> str:
     return "—" if v is None else f"{v:,.0f} €".replace(",", " ")
 
 
+def map_line(row) -> str | None:
+    """«📍 адрес» и ссылка на Google Maps; без номера дома — честно «примерно». Нет адреса — None."""
+    street, plz, district = (getattr(row, k, "") or "" for k in ("street", "postcode", "district"))
+    city = f"{plz} Bonn" if plz else ("Bonn" if street else "")
+    query = ", ".join(x for x in (street, city) if x) or (f"{district}, Bonn" if district else "")
+    if not query:
+        return None
+    shown = query if street or not district else district
+    if district and street:
+        shown += f" ({district})"
+    approx = "" if re.search(r"\d", street) else " (примерно)"
+    return f"📍 {shown}{approx}\n🗺 https://maps.google.com/?q={quote_plus(query)}"
+
+
 def format_draft(row, text: str, warm_estimated: bool) -> str:
     warm = ("≈ " if warm_estimated else "") + _money(row.warm)
-    head = [f"Черновик #{row.id} · {row.platform}", row.title, row.url, f"Тёплая аренда: {warm}"]
+    head = [f"Черновик #{row.id} · {row.platform}", row.title, row.url, map_line(row), f"Тёплая аренда: {warm}"]
     if row.reason:
         head.append(f"⚠ {row.reason}")
     return "\n".join(x for x in head if x) + "\n\n" + text
@@ -32,7 +47,7 @@ def format_reply(row, r) -> str:
         if r.contact:
             head.append(f"От: {r.contact}")
     else:
-        head = [f"Ответ на объявление #{row.id} · {row.platform}", row.title, row.url]
+        head = [f"Ответ на объявление #{row.id} · {row.platform}", row.title, row.url, map_line(row)]
     return "\n".join(x for x in head if x) + f"\n\n{r.excerpt}\n\n{r.link}"
 
 
