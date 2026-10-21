@@ -370,6 +370,37 @@ async def test_pause_all_and_resume_all():
     assert env.ka.searches == 1
 
 
+async def test_login_pauses_platform_and_restores_previous_state():
+    env = Env()
+    e = env.engine
+    e.login_started("kleinanzeigen")
+    assert e.status()["paused"] == ["kleinanzeigen"]
+    e.login_finished("kleinanzeigen", ok=False)   # вход не удался — как было до входа
+    assert e.status()["paused"] == []
+    e.pause("wggesucht")
+    e.login_started("wggesucht")
+    e.login_finished("wggesucht", ok=False)
+    assert e.status()["paused"] == ["wggesucht"]   # пауза владельца сохраняется
+    env.ka.search_exc = BlockedError("logged_out")
+    await e.poll_once("kleinanzeigen")
+    e.login_started("kleinanzeigen")
+    e.login_finished("kleinanzeigen", ok=True)   # вход выполнен — пауза и случай сняты
+    assert e.status()["paused"] == ["wggesucht"] and env.store.open_incidents() == []
+
+
+async def test_poll_waiting_for_lock_does_not_search_after_login_started():
+    env = Env()
+    lock = env.browser.lock("kleinanzeigen")
+    await lock.acquire()   # окно входа (show_login) держит площадку
+    task = asyncio.create_task(env.engine.poll_once("kleinanzeigen"))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    env.engine.login_started("kleinanzeigen")
+    lock.release()
+    await task
+    assert env.ka.searches == 0
+
+
 async def test_ai_failure_marks_failed_single_incident(eng):
     eng.ai.exc = AIError("нейросеть недоступна")
     assert await eng.engine.process("kleinanzeigen", L()) == "failed"

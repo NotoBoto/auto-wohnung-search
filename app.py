@@ -732,6 +732,8 @@ class App(ctk.CTk):
             finally:
                 self.last_poll[platform] = time.time()
         engine.poll_once = tracked   # циклы Engine.run берут poll_once с экземпляра при каждом вызове
+        for key in list(self.login_btns):   # запуск во время входа: площадку не трогаем до «Готово»
+            engine.login_started(key)
         self.bot_app = await start_bot(c, engine, self.store)
         self.engine = engine
         self.run_task = asyncio.get_running_loop().create_task(engine.run())
@@ -1072,10 +1074,12 @@ class App(ctk.CTk):
         btn = self.plat_ui[key]["login"]
         self.login_btns[key] = btn
         btn.configure(text="Открываю…", state="disabled")
+        self._login_hold(key, None)   # движок не уводит окно со страницы входа
 
         def opened(_, err):
             if err:
                 self.login_btns.pop(key, None)
+                self._login_hold(key, False)
                 btn.configure(text="Войти", state="normal")
                 messagebox.showerror("Вход", f"Не удалось открыть окно браузера: {err}")
                 return
@@ -1083,6 +1087,16 @@ class App(ctk.CTk):
                           command=lambda: self.finish_login(key))
             self.say("info", "Вход", "Войдите в аккаунт в открывшемся окне Edge и нажмите «Готово» здесь.")
         self.submit(self.browser.show_login(key, cls.login_url), opened)
+
+    def _login_hold(self, key: str, ok: bool | None):
+        """None — вход начат (площадка на паузе); True/False — вход закончен (пауза снята или как до входа)."""
+        e = self.engine
+        if not e:
+            return
+        if ok is None:
+            self.loop.call_soon_threadsafe(e.login_started, key)
+        else:
+            self.loop.call_soon_threadsafe(e.login_finished, key, ok)
 
     async def _check_login(self, key: str, cls) -> bool:
         src = self.engine.sources[key] if self.engine else cls()
@@ -1106,15 +1120,17 @@ class App(ctk.CTk):
             btn.configure(text="Войти", state="normal", fg_color=BTN_COLOR, hover_color=BTN_HOVER,
                           command=lambda: self.on_login(key))
             if err:
+                self._login_hold(key, False)
                 log.warning("%s: вход не проверен: %r", name, err)
                 messagebox.showerror("Вход", f"Не удалось проверить вход на {name}: {err}")
                 return
             if not ok:
+                self._login_hold(key, False)
                 messagebox.showwarning("Вход", f"{name}: вход не выполнен. Нажмите «Войти» и попробуйте ещё раз.")
                 return
             log.info("%s: вход выполнен", name)
             if self.engine:
-                self.loop.call_soon_threadsafe(self.engine.resume, key)   # снимает паузу и закрывает случаи
+                self._login_hold(key, True)   # снимает паузу и закрывает случаи
             else:
                 self.store.close_incidents(key)
             p = self.conf["platforms"][key]

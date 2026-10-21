@@ -31,6 +31,10 @@ RECHECK_WINDOW = timedelta(hours=24)  # такие seen обрабатываем
 BLOCKING_KINDS = ("captcha", "logged_out", "blocked", "broken")   # эти случаи держат площадку на паузе
 
 
+class Paused(Exception):
+    """Площадку поставили на паузу, пока ждали её блокировку (например, владелец входит в аккаунт)."""
+
+
 class Notifier(Protocol):
     async def draft(self, row: Row, text: str, warm_estimated: bool) -> int: ...   # message_id
     async def ask_duplicate(self, row: Row, match: Row) -> None: ...
@@ -70,6 +74,7 @@ class Engine:
         self._draft_at: dict[int, datetime] = {}     # когда показан черновик (для draft_ttl_hours)
         self._asked_stuck: set[int] = set()
         self._stuck_paused: set[str] = set()   # площадки на паузе из-за неясной отправки (снимает resolve_stuck)
+        self._login_prev: dict[str, bool] = {}   # была ли площадка на паузе до входа владельца
         self._recheck_lock = asyncio.Lock()   # profile_updated: один проход за раз
         self._stop = asyncio.Event()
 
@@ -99,6 +104,19 @@ class Engine:
             self._stuck_paused.discard(platform)
         for p in names:
             self.store.close_incidents(p)
+
+    def login_started(self, platform: str) -> None:
+        """Владелец входит в аккаунт в окне площадки: конвейер её не трогает (окно не уводим со страницы входа)."""
+        self._login_prev.setdefault(platform, platform in self._paused)
+        self._paused.add(platform)
+
+    def login_finished(self, platform: str, ok: bool) -> None:
+        """Вход выполнен — пауза и случаи сняты; не выполнен — пауза как до входа."""
+        was_paused = self._login_prev.pop(platform, True)
+        if ok:
+            self.resume(platform)
+        elif not was_paused:
+            self._paused.discard(platform)
 
     def status(self) -> dict:
         today = to_local(self.clock()).date()
@@ -141,8 +159,10 @@ class Engine:
     def _row_listing(self, row: Row) -> Listing:
         return self._listings.get(row.id) or Listing(row.platform, row.ext_id, row.url, row.title)
 
-    async def _detail(self, platform: str, l: Listing) -> Listing:
+    async def _detail(self, platform: str, l: Listing, check_pause: bool = False) -> Listing:
         async with self.browser.lock(platform):
+            if check_pause and self._paused_now(platform):   # пауза пришла, пока ждали блокировку
+                raise Paused(platform)
             page = await self.browser.page(platform)
             return await self.sources[platform].fetch_detail(page, l)
 
@@ -162,8 +182,8 @@ class Engine:
         if d.kind == "exact":
             known = self._known(l, d.match_id)
             return known.status if known else self._mark_duplicate(l, estimate_warm(l)[0], d.match_id)
-        # 2. подробности (BlockedError/SourceBroken уходят в poll_once)
-        l = await self._detail(platform, l)
+        # 2. подробности (BlockedError/SourceBroken/Paused уходят в poll_once)
+        l = await self._detail(platform, l, check_pause=True)
         warm, est = estimate_warm(l)
         # 3. от этой проверки до резерва — ни одного await
         d = self.store.find_dedup(l, warm, days)
@@ -387,6 +407,8 @@ class Engine:
             return
         try:
             async with self.browser.lock(platform):
+                if self._paused_now(platform):   # пауза пришла, пока ждали блокировку
+                    return
                 listings = await src.search(await self.browser.page(platform))
         except BlockedError as e:
             await self._block(platform, e.kind, str(e))
@@ -402,6 +424,8 @@ class Engine:
                 break
             try:
                 await self.process(platform, l)
+            except Paused:
+                break
             except BlockedError as e:
                 await self._block(platform, e.kind, str(e))
                 break
@@ -453,7 +477,10 @@ class Engine:
                 continue
             self.store.set_status(row.id, "seen", reason="")   # забрали: один раз, даже если дальше сбой
             try:
-                l = self._listings.get(row.id) or await self._detail(row.platform, self._row_listing(row))
+                l = self._listings.get(row.id) or await self._detail(row.platform, self._row_listing(row), check_pause=True)
+            except Paused:
+                self.store.set_status(row.id, "seen", reason=NO_PROFILE)   # вернуть: заберём в следующий раз
+                continue
             except BlockedError as e:
                 await self._block(row.platform, e.kind, str(e))
                 continue
