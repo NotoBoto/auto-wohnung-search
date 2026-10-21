@@ -413,12 +413,77 @@ async def test_missing_required_field_becomes_draft_in_auto():
     assert env.store.get(2).status == "draft" and len(env.notifier.names("draft")) == 2
 
 
-async def test_send_error_marks_failed_with_incident():
+async def test_send_error_keeps_sending_and_asks_owner():
     env = Env(mode="auto")
     await env.engine.process("kleinanzeigen", L())
     env.ka.send_exc = RuntimeError("кнопка не найдена")
     await env.engine.send_queued_once()
-    assert env.store.by_status("failed") and env.notifier.names("incident") == [("incident", "kleinanzeigen", "send")]
+    # исход неизвестен (форма могла уйти): не failed, а вопрос владельцу
+    assert env.store.get(1).status == "sending" and env.store.by_status("failed") == []
+    assert env.notifier.names("ask_stuck") == [("ask_stuck", 1)]
+    assert env.notifier.names("incident") == [("incident", "kleinanzeigen", "send")]
+    await env.engine.regenerate(1)
+    await env.engine.send_queued_once()
+    await env.engine.startup()   # тот же сеанс: повторно не спрашиваем
+    assert env.store.get(1).status == "sending" and len(env.ai.calls) == 1
+    assert len(env.notifier.names("ask_stuck")) == 1
+
+
+async def test_send_incident_closes_after_success_and_does_not_pause_on_restart():
+    env = Env(mode="auto")
+    await env.engine.process("kleinanzeigen", L())
+    env.ka.send_exc = RuntimeError("сбой")
+    await env.engine.send_queued_once()
+    assert env.store.open_incidents() == [("kleinanzeigen", "send")]
+    env2 = Env(mode="auto", store=env.store, clock=env.clock)   # перезапуск
+    await env2.engine.startup()
+    assert env2.engine.status()["paused"] == []   # «send» не блокирует площадку
+    await env2.engine.process("kleinanzeigen", L(ext_id="2", street="Andere Str. 1", contact_name="Frau Weber"))
+    await env2.engine.send_queued_once()
+    assert len(env2.ka.sent) == 1 and env2.store.open_incidents() == []
+
+
+async def test_concurrent_send_same_row_after_block_sends_once():
+    env = Env(mode="auto")
+    await env.engine.process("kleinanzeigen", L())
+    env.ka.send_exc = BlockedError("captcha")
+    calls = []
+    orig = env.ka.send
+
+    async def send(page, l, text, profile):
+        calls.append(l.ext_id)
+        await orig(page, l, text, profile)
+    env.ka.send = send
+
+    async def both(*coros):
+        # площадка занята (идёт поиск): оба отправителя проходят проверку и ждут блокировку
+        lock = env.browser.lock("kleinanzeigen")
+        await lock.acquire()
+        tasks = [asyncio.create_task(c) for c in coros]
+        for _ in range(5):
+            await asyncio.sleep(0)
+        lock.release()
+        await asyncio.gather(*tasks)
+
+    await both(env.engine._send(1), env.engine._send(1))
+    assert calls == ["1"] and env.store.get(1).status == "queued"
+    env.ka.send_exc = None
+    env.engine.resume("kleinanzeigen")
+    await both(env.engine._send(1), env.engine.send_queued_once())
+    assert len(calls) == 2 and len(env.ka.sent) == 1 and env.store.get(1).status == "sent"
+
+
+async def test_skip_only_from_open_states(eng):
+    i = sent_row(eng, "s1", "Gasse 1", T0)
+    await eng.engine.skip(i)
+    assert eng.store.get(i).status == "sent"
+    j = eng.store.add(L(ext_id="2", street="Andere Str. 1"), 800)
+    eng.store.set_status(j, "queued", reason="generating")
+    await eng.engine.skip(j)
+    assert eng.store.get(j).status == "queued"
+    await eng.engine.process("kleinanzeigen", L(ext_id="3", street="Dritte Str. 3"))
+    await eng.engine.skip(3)
+    assert eng.store.get(3).status == "skipped"
 
 
 async def test_profile_incomplete_no_letter():
@@ -429,6 +494,47 @@ async def test_profile_incomplete_no_letter():
     env.clock.now += timedelta(hours=24)
     await env.engine.process("kleinanzeigen", L(ext_id="3", street="Dritte Str. 3"))
     assert len(env.notifier.names("missing_profile")) == 2
+
+
+async def test_seen_rows_processed_once_after_profile_filled():
+    env = Env(mode="confirm", profile={})
+    env.clock.now = T0 - timedelta(hours=2)
+    old = env.store.add(L(ext_id="4", street="Alte Str. 4"), 800)                    # #1 — старше 24 ч
+    env.store.set_status(old, "seen", reason="профиль не заполнен")
+    env.clock.now = T0
+    await env.engine.process("kleinanzeigen", L())                                   # #2
+    await env.engine.process("wggesucht", L("wggesucht", "w1", street="Musterstr. 12"))  # #3 та же квартира
+    env.clock.now = T0 + timedelta(hours=1)
+    await env.engine.process("kleinanzeigen", L(ext_id="3", street="Dritte Str. 3"))  # #4
+    env.clock.now = T0 + timedelta(hours=23)
+    await env.engine.maintenance_once()          # профиль всё ещё пуст — ничего
+    assert env.ai.calls == []
+    env.cfg["profile"].update(PROFILE)
+    await env.engine.profile_updated()
+    await env.engine.maintenance_once()
+    await env.engine.profile_updated()
+    st = {i: env.store.get(i).status for i in (1, 2, 3, 4)}
+    assert st[4] == "draft" and st[1] == "seen"
+    assert sorted([st[2], st[3]]) == ["draft", "duplicate"]   # одна квартира — одно письмо
+    assert len(env.ai.calls) == 2 and len(env.notifier.names("draft")) == 2
+
+
+async def test_missing_profile_throttle_survives_restart():
+    env = Env(profile={})
+    await env.engine.process("kleinanzeigen", L())
+    env2 = Env(profile={}, store=env.store, clock=env.clock)
+    await env2.engine.process("kleinanzeigen", L(ext_id="2", street="Andere Str. 1"))
+    assert env2.notifier.names("missing_profile") == []
+
+
+async def test_digest_not_repeated_after_restart():
+    env = Env()
+    env.clock.now = datetime(2026, 10, 21, 18, 0)
+    await env.engine.maintenance_once()
+    env2 = Env(store=env.store, clock=env.clock)
+    env2.clock.now = datetime(2026, 10, 21, 18, 30)
+    await env2.engine.maintenance_once()
+    assert len(env.notifier.names("digest")) == 1 and env2.notifier.names("digest") == []
 
 
 async def test_contact_cap(eng):

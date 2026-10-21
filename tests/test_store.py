@@ -214,3 +214,20 @@ def test_sent_at_none_is_filled_from_clock(store):
     store.set_status(i, "sent", sent_at=None)
     assert store.get(i).sent_at == NOW
     assert store.sent_count("kleinanzeigen", NOW - timedelta(hours=1)) == 1
+
+
+def test_meta_roundtrip(tmp_path):
+    s = Store(tmp_path / "m.db", clock=lambda: NOW)
+    assert s.get_meta("digest_day") is None
+    s.set_meta("digest_day", "2026-10-21")
+    s.set_meta("digest_day", "2026-10-22")
+    assert Store(tmp_path / "m.db").get_meta("digest_day") == "2026-10-22"   # переживает перезапуск
+
+
+def test_close_incidents_by_kind(store):
+    store.open_incident("kleinanzeigen", "send")
+    store.open_incident("kleinanzeigen", "captcha")
+    store.close_incidents("kleinanzeigen", "send")
+    assert store.open_incidents() == [("kleinanzeigen", "captcha")]
+    store.close_incidents("kleinanzeigen")
+    assert store.open_incidents() == []

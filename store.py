@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS replies (
 CREATE TABLE IF NOT EXISTS incidents (
     id INTEGER PRIMARY KEY AUTOINCREMENT, platform TEXT NOT NULL, kind TEXT NOT NULL,
     opened_at TEXT NOT NULL, closed_at TEXT);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 
@@ -254,9 +255,21 @@ class Store:
             self._db.commit()
             return True
 
-    def close_incidents(self, platform: str) -> None:
-        self._write("UPDATE incidents SET closed_at=? WHERE platform=? AND closed_at IS NULL",
-                    (_ts(self._clock()), platform))
+    def close_incidents(self, platform: str, kind: str | None = None) -> None:
+        """Закрывает открытые случаи площадки; с kind — только этого вида."""
+        sql = "UPDATE incidents SET closed_at=? WHERE platform=? AND closed_at IS NULL"
+        args = (_ts(self._clock()), platform)
+        if kind is not None:
+            sql, args = sql + " AND kind=?", (*args, kind)
+        self._write(sql, args)
+
+    def get_meta(self, key: str) -> str | None:
+        r = self._db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return r["value"] if r else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self._write("INSERT INTO meta (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, value))
 
     def open_incidents(self) -> list[tuple[str, str]]:
         return [(r["platform"], r["kind"]) for r in self._db.execute(

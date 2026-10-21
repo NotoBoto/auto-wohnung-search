@@ -6,6 +6,7 @@
 без await, поэтому две площадки с одной квартирой не получат два письма.
 """
 import asyncio
+import dataclasses
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
@@ -24,6 +25,9 @@ SEND_EVERY = 10          # как часто смотреть очередь о�
 MAINTENANCE_EVERY = 60   # чистка черновиков и сводка, сек
 MISSING_PROFILE_EVERY = timedelta(hours=24)
 GENERATING = "generating"   # reason у строки, зарезервированной на время генерации письма
+NO_PROFILE = "профиль не заполнен"   # reason у строки seen: ждёт профиля
+RECHECK_WINDOW = timedelta(hours=24)  # такие seen обрабатываем, когда профиль заполнен
+BLOCKING_KINDS = ("captcha", "logged_out", "blocked", "broken")   # эти случаи держат площадку на паузе
 
 
 class Notifier(Protocol):
@@ -64,8 +68,6 @@ class Engine:
         self._listings: dict[int, Listing] = {}      # подробности объявления для отправки и перегенерации
         self._draft_at: dict[int, datetime] = {}     # когда показан черновик (для draft_ttl_hours)
         self._asked_stuck: set[int] = set()
-        self._missing_profile_at: datetime | None = None
-        self._digest_day = None
         self._stop = asyncio.Event()
 
     # ---------- настройки и состояние ----------
@@ -179,10 +181,11 @@ class Engine:
             self.store.set_status(id, "filtered", reason=r.reason)
             return "filtered"
         if not profile_complete(profile):
-            self.store.set_status(id, "seen", reason="профиль не заполнен")
+            self.store.set_status(id, "seen", reason=NO_PROFILE)
             now = self.clock()
-            if self._missing_profile_at is None or now - self._missing_profile_at >= MISSING_PROFILE_EVERY:
-                self._missing_profile_at = now
+            last = self.store.get_meta("missing_profile_at")   # переживает перезапуск
+            if last is None or now - datetime.fromisoformat(last) >= MISSING_PROFILE_EVERY:
+                self.store.set_meta("missing_profile_at", now.isoformat())
                 await self._safe(self.notifier.missing_profile())
             return "seen"
         if self.store.contact_sent_count(contact_key(l.contact_name), 7) >= self.cfg["contact_cap_7d"]:
@@ -233,14 +236,17 @@ class Engine:
         """Одна попытка. Не ждёт: если рано или лимит дня исчерпан, строка остаётся queued."""
         row = self.store.get(id)
         platform = row.platform
-        src = self.sources.get(platform)
-        if (row.status != "queued" or row.reason == GENERATING or not row.letter or src is None
-                or self._paused_now(platform) or not profile_complete(self.cfg["profile"])):
+        if not self._sendable(row):
             return
         async with self.browser.lock(platform):
+            # пока ждали блокировку, строку мог отправить или вернуть в очередь другой вызов — проверяем заново
+            row = self.store.get(id)
+            if not self._sendable(row):
+                return
             wait = self._limiter(platform).wait_seconds(self.clock())
             if wait is None or wait > 0:
                 return
+            src = self.sources[platform]
             self.store.set_status(id, "sending")
             l = self._row_listing(row)
             try:
@@ -252,12 +258,24 @@ class Engine:
             except MissingFieldError as e:
                 await self._to_draft(id, row.letter, False, f"нет поля: {e.field}")
             except Exception as e:
-                log.exception("%s: отправка #%s не удалась", platform, id)
-                self.store.set_status(id, "failed", reason=f"отправка: {e}"[:300])
+                # исход неизвестен (форма могла уйти): остаётся sending, решает владелец через resolve_stuck
+                log.exception("%s: отправка #%s прервана", platform, id)
                 await self._incident(platform, "send", str(e))
+                await self._ask_stuck(self.store.get(id))
             else:
                 self.store.set_status(id, "sent", sent_at=self.clock())   # до снятия блокировки площадки
+                self.store.close_incidents(platform, "send")
                 log.info("%s: письмо #%s отправлено", platform, id)
+
+    def _sendable(self, row: Row) -> bool:
+        return (row.status == "queued" and row.reason != GENERATING and bool(row.letter)
+                and row.platform in self.sources and not self._paused_now(row.platform)
+                and profile_complete(self.cfg["profile"]))
+
+    async def _ask_stuck(self, row: Row) -> None:
+        if row.id not in self._asked_stuck:   # один вопрос на строку за сеанс
+            self._asked_stuck.add(row.id)
+            await self._safe(self.notifier.ask_stuck(row))
 
     async def send_queued_once(self) -> None:
         """Очередь по created_at; на площадку — одна попытка за проход."""
@@ -282,7 +300,7 @@ class Engine:
 
     async def regenerate(self, id: int, wish: str = "") -> None:
         row = self.store.get(id)
-        if row.status not in ("draft", "failed"):
+        if row.status not in ("draft", "failed"):   # sending/sent — никогда
             return
         self.store.set_status(id, "queued", reason=GENERATING)
         try:
@@ -294,7 +312,9 @@ class Engine:
         await self._write_letter(id, l, estimate_warm(l)[1], wish, force_draft=True)
 
     async def skip(self, id: int) -> None:
-        self.store.set_status(id, "skipped")
+        row = self.store.get(id)   # старая кнопка на отправленном письме ничего не меняет
+        if row.status in ("draft", "ask_dup", "failed") or (row.status == "queued" and row.reason != GENERATING):
+            self.store.set_status(id, "skipped")
 
     async def resolve_duplicate(self, id: int, send: bool) -> None:
         row = self.store.get(id)
@@ -324,16 +344,14 @@ class Engine:
     # ---------- циклы ----------
 
     async def startup(self) -> None:
-        for platform, _ in self.store.open_incidents():   # открытый случай держит паузу и после перезапуска
-            if platform in self.cfg["platforms"]:
+        for platform, kind in self.store.open_incidents():   # капча и т.п. держат паузу и после перезапуска
+            if platform in self.cfg["platforms"] and kind in BLOCKING_KINDS:
                 self._paused.add(platform)
         for row in self.store.by_status("queued"):
             if row.reason == GENERATING:
                 self.store.set_status(row.id, "failed", reason="прервано при генерации")
         for row in self.store.by_status("sending"):   # не отправляем повторно — спрашиваем владельца
-            if row.id not in self._asked_stuck:
-                self._asked_stuck.add(row.id)
-                await self._safe(self.notifier.ask_stuck(row))
+            await self._ask_stuck(row)
 
     async def poll_once(self, platform: str) -> None:
         src = self.sources.get(platform)
@@ -383,9 +401,51 @@ class Engine:
                 self._draft_at.pop(row.id, None)
                 await self._safe(self.notifier.remove_draft(row))
         local = to_local(now)
-        if local.hour == self.cfg["digest_hour"] and self._digest_day != local.date():
-            self._digest_day = local.date()
+        day = local.date().isoformat()
+        if local.hour == self.cfg["digest_hour"] and self.store.get_meta("digest_day") != day:
+            self.store.set_meta("digest_day", day)   # переживает перезапуск
             await self._safe(self.notifier.digest(self._day_stats(local.date())))
+        await self.profile_updated()
+
+    async def profile_updated(self) -> None:
+        """Профиль заполнен: объявления, отложенные за последние 24 ч, один раз проходят конвейер."""
+        if not profile_complete(self.cfg["profile"]):
+            return
+        since = self.clock() - RECHECK_WINDOW
+        for row in self.store.by_status("seen"):
+            if row.reason != NO_PROFILE or row.created_at < since or self._paused_now(row.platform):
+                continue
+            if row.id not in self._listings and row.platform not in self.sources:
+                continue
+            self.store.set_status(row.id, "seen", reason="")   # один раз, даже если дальше сбой
+            try:
+                l = self._listings.get(row.id) or await self._detail(row.platform, self._row_listing(row))
+            except BlockedError as e:
+                await self._block(row.platform, e.kind, str(e))
+                continue
+            except SourceBroken as e:
+                await self._block(row.platform, "broken", str(e))
+                continue
+            except Exception:
+                log.exception("%s: объявление #%s не загрузилось", row.platform, row.id)
+                continue
+            self._listings[row.id] = l
+            await self._recheck(row.id, l)
+
+    async def _recheck(self, id: int, l: Listing) -> str:
+        """Дедупликация уже записанной строки и резерв — как шаг 3 в process(), без await до резерва."""
+        warm = estimate_warm(l)[0]
+        # find_dedup сначала находит саму строку по (platform, ext_id) — ищем по адресу с подменённым ext_id
+        probe = dataclasses.replace(l, ext_id=l.ext_id + "#recheck")
+        d = self.store.find_dedup(probe, warm, self.cfg["dedup_days"])
+        if d.kind == "exact":
+            self.store.set_status(id, "duplicate", reason=f"как #{d.match_id}")
+            return "duplicate"
+        if d.kind == "similar":
+            self.store.set_status(id, "ask_dup", reason=f"похоже на #{d.match_id}")
+            await self._safe(self.notifier.ask_duplicate(self.store.get(id), self.store.get(d.match_id)))
+            return "ask_dup"
+        return await self._continue(id, l)
 
     def _poll_delay(self, platform: str) -> float:
         p = self.cfg["platforms"][platform]
