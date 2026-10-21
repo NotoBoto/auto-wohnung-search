@@ -1,9 +1,12 @@
 import html as _html
+import logging
 import re
 
 from browser import human_pause, human_type
-from models import Listing, parse_area, parse_lease_months, parse_money, parse_rooms
-from sources.base import BlockedError, MissingFieldError, Source, SourceBroken
+from models import Listing, parse_area, parse_money, parse_rooms
+from sources.base import BlockedError, MissingFieldError, Source, SourceBroken, listing_flags
+
+log = logging.getLogger(__name__)
 
 BASE = "https://www.kleinanzeigen.de"
 BONN_LOC = "c203l1038"   # c203 = Mietwohnungen, l1038 = Bonn
@@ -11,11 +14,7 @@ BONN_LOC = "c203l1038"   # c203 = Mietwohnungen, l1038 = Bonn
 _ARTICLE_RE = re.compile(r'<article\b[^>]*\bdata-adid="(\d+)"[^>]*\bdata-href="([^"]+)"[^>]*>(.*?)</article>', re.S)
 _TAG_RE = re.compile(r"<[^>]+>")
 _PLZ_RE = re.compile(r"\b(\d{5})\b\s*(?:Bonn\s*-\s*)?(.*)")
-_SHARED_RE = re.compile(r"\bWG\b|Mitbewohner|WG-Zimmer", re.I)
-_SWAP_RE = re.compile(r"Tausch", re.I)
-_FURNISHED_RE = re.compile(r"möbliert auf Zeit|Wohnen auf Zeit", re.I)
-_WBS_RE = re.compile(r"\bWBS\b", re.I)
-_LIMITED_RE = re.compile(r"Zwischenmiete|befristet", re.I)
+_EMPTY_RE = re.compile(r"srchrslt-noresult|keine\s+(?:Anzeigen|Ergebnisse|Treffer)\s+gefunden", re.I)   # маркер пустой выдачи: не проверено вживую
 _BLOCK_RE = re.compile(r"geetest|captcha|Zugriff verweigert|Access Denied", re.I)
 _NORMAL_MARKERS = ('id="viewad-title"', "srchrslt", "data-adid=")
 
@@ -25,13 +24,10 @@ def _text(s: str) -> str:
 
 
 def _flags(l: Listing, text: str) -> None:
-    """Признаки из заголовка и описания (ключевые слова)."""
-    l.is_shared_flat = l.is_shared_flat or bool(_SHARED_RE.search(text))
-    l.is_swap = l.is_swap or bool(_SWAP_RE.search(text))
-    l.furnished_temporary = l.furnished_temporary or bool(_FURNISHED_RE.search(text))
-    l.wbs_required = l.wbs_required or bool(_WBS_RE.search(text))
-    if l.limited_months is None and _LIMITED_RE.search(text):
-        l.limited_months = parse_lease_months(text)
+    """Признаки из заголовка и описания (общий хелпер base.listing_flags)."""
+    for k, v in listing_flags(text).items():
+        if v and not getattr(l, k):
+            setattr(l, k, v)
 
 
 def _locality(s: str, l: Listing) -> None:
@@ -66,7 +62,7 @@ class Kleinanzeigen(Source):
     def parse_search(html: str) -> list[Listing]:
         arts = _ARTICLE_RE.findall(html)
         if not arts:
-            if "srchrslt" in html:   # выдача есть, но пустая
+            if "data-adid" not in html and _EMPTY_RE.search(html):   # настоящая пустая выдача
                 return []
             raise SourceBroken("kleinanzeigen: выдача не распознана")
         out = []
@@ -75,6 +71,7 @@ class Kleinanzeigen(Source):
             url = url if url.startswith("http") else BASE + url
             h3 = re.search(r"<h3\b.*?</h3>", body, re.S)
             if not h3:
+                log.warning("kleinanzeigen: объявление %s без заголовка пропущено", ad_id)
                 continue
             l = Listing("kleinanzeigen", ad_id, url, title=_text(h3.group(0)))
             loc = re.search(r"<span>(\d{5}[^<]*)</span>", body)
@@ -90,6 +87,8 @@ class Kleinanzeigen(Source):
                     l.cold_rent = parse_money(p)   # цена в выдаче — Kaltmiete
             _flags(l, l.title)
             out.append(l)
+        if not out:
+            raise SourceBroken("kleinanzeigen: ни одно объявление выдачи не разобрано")
         return out
 
     @staticmethod
@@ -163,6 +162,8 @@ class Kleinanzeigen(Source):
             await page.goto(BASE)
             await page.wait_for_load_state("load")
             await accept_consent(page)
+        if kind := self.detect_block(await page.content(), page.url):
+            raise BlockedError(kind)
         return await page.locator("[data-testid='login-button']").count() == 0
 
     # не проверено вживую — проверить после входа пользователя

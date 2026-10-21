@@ -74,10 +74,6 @@ def test_parse_search_garbage_raises():
         Kleinanzeigen.parse_search("<html><body>Wartung</body></html>")
 
 
-def test_parse_search_empty_results_ok():
-    assert Kleinanzeigen.parse_search('<div id="srchrslt-adtable"></div>') == []
-
-
 def test_detect_block_login():
     assert Kleinanzeigen.detect_block("", "https://www.kleinanzeigen.de/m-einloggen.html") == "logged_out"
 
@@ -93,3 +89,37 @@ def test_search_url():
     assert u.startswith("https://www.kleinanzeigen.de/s-wohnung-mieten/bonn/") and "preis::900" in u and "c203l1038" in u
     assert "sortingField=SORTING_DATE" in u
     assert "preis" not in Kleinanzeigen().search_url({})
+
+
+def test_parse_search_empty_marker_ok():
+    assert Kleinanzeigen.parse_search('<div id="srchrslt"><p>Leider keine Anzeigen gefunden</p></div>') == []
+
+
+def test_parse_search_srchrslt_without_articles_raises():
+    with pytest.raises(SourceBroken):
+        Kleinanzeigen.parse_search('<div id="srchrslt-adtable"><div data-adid="1"></div></div>')
+
+
+def test_parse_search_no_title_all_raises():
+    html = '<article data-adid="1" data-href="/s-anzeige/x/1-203-1"><p>x</p></article>'
+    with pytest.raises(SourceBroken):
+        Kleinanzeigen.parse_search(html)
+
+
+def test_parse_search_no_title_skipped_with_warning(caplog):
+    good = read("kleinanzeigen/search.html")
+    bad = '<article data-adid="1" data-href="/s-anzeige/x/1-203-1"><p>x</p></article>'
+    items = Kleinanzeigen.parse_search(bad + good)
+    assert len(items) >= 10 and "без заголовка" in caplog.text
+
+
+def test_negated_wbs_in_detail():
+    assert not detail(_with_desc("Kein WBS erforderlich")).wbs_required
+
+
+async def test_is_logged_in_captcha_raises():
+    class P:
+        url = "https://www.kleinanzeigen.de/"
+        async def content(self): return "<html>Geetest captcha</html>"
+    with pytest.raises(BlockedError):
+        await Kleinanzeigen().is_logged_in(P())

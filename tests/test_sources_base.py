@@ -129,3 +129,18 @@ async def test_fetch_detail_default():
 
 def test_missing_field_error():
     assert MissingFieldError("phone").field == "phone"
+
+
+@pytest.mark.parametrize("text,key,value", [
+    ("Kein WBS erforderlich", "wbs_required", False),
+    ("WBS erforderlich", "wbs_required", True),
+    ("kein Tausch", "is_swap", False),
+    ("Tauschwohnung", "is_swap", True),
+    ("keine WG", "is_shared_flat", False),
+    ("WG-Zimmer frei", "is_shared_flat", True),
+    ("unbefristet zu vermieten, 12 Monate Kündigungsfrist", "limited_months", None),
+    ("befristet auf 6 Monate", "limited_months", 6),
+])
+def test_listing_flags(text, key, value):
+    from sources.base import listing_flags
+    assert listing_flags(text)[key] == value

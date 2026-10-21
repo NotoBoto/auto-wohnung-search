@@ -1,14 +1,37 @@
 import random
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from models import Listing
+from models import Listing, parse_lease_months
 from store import Store
 
 TZ = ZoneInfo("Europe/Berlin")
 NIGHT_END_HOUR = 7   # ночь: 00:00–06:59 местного времени
+
+
+_NEG = r"(?<!\w)(?:kein|keine|keinen|keiner|ohne|nicht|nicht nötig)\W+(?:\w+\W+){0,2}?"
+
+
+def _kw(pattern: str, text: str) -> bool:
+    """Есть ключевое слово, перед которым (в пределах ~3 слов) нет отрицания."""
+    for m in re.finditer(pattern, text, re.I):
+        if not re.search(_NEG + r"$", text[max(0, m.start() - 40):m.start()], re.I):
+            return True
+    return False
+
+
+def listing_flags(text: str) -> dict:
+    """Признаки объявления по ключевым словам заголовка и описания (общие для всех площадок)."""
+    return {
+        "is_shared_flat": _kw(r"\bWG\b|Mitbewohner", text),
+        "is_swap": _kw(r"Tausch", text),
+        "wbs_required": _kw(r"\bWBS\b", text),
+        "furnished_temporary": _kw(r"möbliert auf Zeit|Wohnen auf Zeit", text),
+        "limited_months": parse_lease_months(text) if _kw(r"Zwischenmiete|(?<!un)befristet", text) else None,
+    }
 
 
 class BlockedError(RuntimeError):
