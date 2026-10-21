@@ -12,3 +12,4 @@ config.json
 browser_profiles/
 logs/
 .env
+.superpowers/
