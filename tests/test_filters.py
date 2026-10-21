@@ -42,3 +42,16 @@ def test_wbs_ok_when_profile_has_wbs():
 
 def test_not_bonn_postcode():
     assert check(L(warm_rent=800, rooms=2, postcode="50667"), FILTERS, {}).reason == "не Бонн"
+
+
+def test_prefilter_on_search_data():
+    from filters import prefilter
+    f = {"city": "Bonn", "max_warm": 900, "min_rooms": 2.0, "min_lease_months": 12}
+    mk = lambda **kw: Listing("kleinanzeigen", "1", "u", title="Wohnung", **kw)
+    assert prefilter(mk(warm_rent=1200), f) == "дороже 900 €"
+    assert prefilter(mk(cold_rent=950), f) == "дороже 900 €"            # тёплая не меньше холодной
+    assert prefilter(mk(cold_rent=800, rooms=1), f) == "меньше 2 комнат"
+    assert prefilter(mk(is_shared_flat=True), f) == "WG"
+    assert prefilter(mk(is_swap=True), f) == "Tausch"
+    assert prefilter(mk(cold_rent=800), f) is None                      # тёплая неизвестна — смотрим подробности
+    assert prefilter(mk(), f) is None

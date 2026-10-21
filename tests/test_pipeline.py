@@ -264,6 +264,63 @@ async def test_skip_answer_filters(eng):
     assert eng.store.by_status("filtered")[0].reason == "nur für Studenten"
 
 
+@pytest.fixture
+def pauses(monkeypatch):
+    import pipeline
+    calls = []
+
+    async def fake(a=0.8, b=2.5):
+        calls.append((a, b))
+    monkeypatch.setattr(pipeline, "human_pause", fake)
+    return calls
+
+
+class CountingSource(FakeSource):
+    def __init__(self, name, listings=()):
+        super().__init__(name, listings)
+        self.detail_calls: list[str] = []
+
+    async def fetch_detail(self, page, l):
+        self.detail_calls.append(l.ext_id)
+        return await super().fetch_detail(page, l)
+
+
+async def test_human_pause_between_detail_loads(pauses):
+    env = Env()
+    env.ka = env.engine.sources["kleinanzeigen"] = CountingSource("kleinanzeigen", [
+        L(ext_id=str(i), street=f"Gasse {i}", contact_name=f"K {i}") for i in range(3)])
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.ka.detail_calls == ["0", "1", "2"] and pauses == [(3, 8), (3, 8)]
+    await env.engine.poll_once("kleinanzeigen")   # всё знакомо: подробности не грузим и не ждём
+    assert len(env.ka.detail_calls) == 3 and len(pauses) == 2
+
+
+async def test_prefilter_without_detail_load(pauses):
+    env = Env()
+    teaser = [L(ext_id="a", warm_rent=1500), L(ext_id="b", rooms=1, street="B 1"),
+              Listing("kleinanzeigen", "c", "https://k/c", title="WG-Zimmer", is_shared_flat=True),
+              L(ext_id="d", street="D 4")]
+    env.ka = env.engine.sources["kleinanzeigen"] = CountingSource("kleinanzeigen", teaser)
+    await env.engine.poll_once("kleinanzeigen")
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.ka.detail_calls == ["d"] and pauses == []
+    assert {r.ext_id: r.reason for r in env.store.by_status("filtered")} == {
+        "a": "дороже 900 €", "b": "меньше 2 комнат", "c": "WG"}
+
+
+async def test_pause_during_human_pause_stops_detail_load(monkeypatch):
+    import pipeline
+    env = Env()
+    env.ka = env.engine.sources["kleinanzeigen"] = CountingSource("kleinanzeigen", [
+        L(ext_id=str(i), street=f"Gasse {i}", contact_name=f"K {i}") for i in range(2)])
+
+    async def login_meanwhile(a=0.8, b=2.5):   # владелец нажал «Войти», пока движок ждал
+        env.engine.login_started("kleinanzeigen")
+    monkeypatch.setattr(pipeline, "human_pause", login_meanwhile)
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.ka.detail_calls == ["0"] and len(env.store.by_status("draft")) == 1
+
+
 # ---------- перезапуск ----------
 
 async def test_restart_with_sending_asks_and_does_not_resend():

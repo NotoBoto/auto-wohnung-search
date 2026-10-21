@@ -13,7 +13,8 @@ from typing import Protocol
 
 import core
 from ai import AIError
-from filters import check, estimate_warm
+from browser import human_pause
+from filters import check, estimate_warm, prefilter
 from letter import LetterError, generate_letter
 from models import Listing, profile_complete
 from sources.base import (TZ, BlockedError, MissingFieldError, NotSubmittedError, RateLimiter, SourceBroken,
@@ -76,6 +77,7 @@ class Engine:
         self._asked_stuck: set[int] = set()
         self._stuck_paused: set[str] = set()   # площадки на паузе из-за неясной отправки (снимает resolve_stuck)
         self._login_prev: dict[str, bool] = {}   # была ли площадка на паузе до входа владельца
+        self._paced: dict[str, bool] = {}   # идёт опрос площадки: грузили ли уже объявление (пауза перед следующим)
         self._recheck_lock = asyncio.Lock()   # profile_updated: один проход за раз
         self._stop = asyncio.Event()
 
@@ -183,10 +185,18 @@ class Engine:
         if d.kind == "exact":
             known = self._known(l, d.match_id)
             return known.status if known else self._mark_duplicate(l, estimate_warm(l)[0], d.match_id)
-        # 2. подробности (BlockedError/SourceBroken/Paused уходят в poll_once)
+        # 2. отсев по данным выдачи — объявление не открываем (строка filtered не блокирует дубли)
+        if reason := prefilter(l, self.cfg["filters"]):
+            self.store.set_status(self.store.add(l, estimate_warm(l)[0]), "filtered", reason=reason)
+            return "filtered"
+        # 3. подробности (BlockedError/SourceBroken/Paused уходят в poll_once); между объявлениями — пауза как у человека
+        if self._paced.get(platform):
+            await human_pause(3, 8)
+        if platform in self._paced:
+            self._paced[platform] = True
         l = await self._detail(platform, l, check_pause=True)
         warm, est = estimate_warm(l)
-        # 3. от этой проверки до резерва — ни одного await
+        # 4. от этой проверки до резерва — ни одного await
         d = self.store.find_dedup(l, warm, days)
         if d.kind == "exact":
             known = self._known(l, d.match_id)
@@ -420,6 +430,13 @@ class Engine:
         except Exception:
             log.exception("%s: поиск не удался", platform)
             return
+        self._paced[platform] = False
+        try:
+            await self._process_all(platform, listings)
+        finally:
+            self._paced.pop(platform, None)
+
+    async def _process_all(self, platform: str, listings: list[Listing]) -> None:
         for l in listings:
             if self._paused_now(platform):
                 break

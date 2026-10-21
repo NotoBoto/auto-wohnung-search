@@ -31,6 +31,16 @@ def _in_bonn(plz: str) -> bool:
     return not plz or (plz.isdigit() and BONN_PLZ[0] <= int(plz) <= BONN_PLZ[1])
 
 
+def prefilter(l: Listing, filters: dict) -> str | None:
+    """Отсев по данным выдачи, до загрузки объявления: причина (как у check) или None — смотрим подробности."""
+    if l.is_shared_flat: return "WG"
+    if l.is_swap: return "Tausch"
+    price = l.warm_rent if l.warm_rent is not None else l.cold_rent   # тёплая не меньше холодной
+    if price is not None and price > filters["max_warm"]: return f"дороже {filters['max_warm']:.0f} €"
+    if l.rooms is not None and l.rooms < filters["min_rooms"]: return f"меньше {filters['min_rooms']:.0f} комнат"
+    return None
+
+
 def check(l: Listing, filters: dict, profile: dict) -> FilterResult:
     warm, est = estimate_warm(l)
 
