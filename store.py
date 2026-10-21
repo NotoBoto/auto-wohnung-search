@@ -29,7 +29,13 @@ class DedupResult:
 
 def _street_key(street: str) -> str:
     s = (street or "").lower().replace("straße", "str").replace("strasse", "str").replace("str.", "str")
-    return re.sub(r"[\s\-]+", "", s)
+    # хвост с городом/PLZ ("..., Bonn", "53115 Bonn") не часть адреса
+    parts = [p for p in re.split(r"[\s,;]+", s) if p and p != "bonn" and not re.fullmatch(r"\d{5}", p)]
+    return re.sub(r"[^\w]|_", "", "".join(parts))
+
+
+def _street_name(street_key: str) -> str:
+    return re.sub(r"\d+\w*$", "", street_key)   # без номера дома
 
 
 def addr_key(l: Listing) -> str:
@@ -127,6 +133,8 @@ class Store:
         bad = set(fields) - set(_FIELDS)
         if bad:
             raise ValueError(f"неизвестные поля: {sorted(bad)}")
+        if status == "sent" and fields.get("sent_at") is None:
+            fields.pop("sent_at", None)   # sent_at=None трактуем как «не задано»: иначе строка выпадет из лимитов
         sets, args = ["status=?"], [status]
         for k, v in fields.items():
             sets.append(f"{k}=?")
@@ -154,8 +162,13 @@ class Store:
                     and (l.rooms is None or r["rooms"] is None or l.rooms == r["rooms"])):
                 continue
             if has_street and r["has_street"]:
-                if r["addr_key"] == key:
+                sk, pl = key.split("|")[:2]
+                rk, pr = r["addr_key"].split("|")[:2]
+                loose = pl == pr or not pl or not pr   # пустой PLZ не опровергает совпадение
+                if sk == rk and pl == pr:
                     return DedupResult("exact", r["id"])
+                if loose and similar is None and (sk == rk or (_street_name(sk) and _street_name(sk) == _street_name(rk))):
+                    similar = r["id"]
             elif l.postcode and l.postcode == r["postcode"] and similar is None:
                 similar = r["id"]
         return DedupResult("similar", similar) if similar is not None else DedupResult("new", None)

@@ -180,3 +180,37 @@ def test_day_stats(store):
     assert s == {"found": 6, "sent": 1, "filtered": {"WG": 2, "WBS": 1},
                  "duplicates": 1, "replies": 1, "failed": 1}
     assert store.day_stats(date(2026, 10, 20))["found"] == 0
+
+
+def _sent(store, **kw):
+    i = store.add(L(ext_id="1", **kw), 850)
+    store.set_status(i, "sent")
+    return i
+
+
+def test_street_without_number_is_similar(store):
+    aid = _sent(store, street="Musterstraße 12")
+    r = store.find_dedup(L(platform="immowelt", ext_id="2", street="Musterstraße"), 850)
+    assert (r.kind, r.match_id) == ("similar", aid)
+
+
+def test_town_suffix_is_exact(store):
+    aid = _sent(store, street="Musterstr. 12")
+    r = store.find_dedup(L(platform="immowelt", ext_id="2", street="Musterstr. 12, Bonn"), 850)
+    assert (r.kind, r.match_id) == ("exact", aid)
+    assert addr_key(L(street="Musterstr. 12, 53115 Bonn")) == "musterstr12|53115"
+
+
+def test_empty_postcode_is_similar(store):
+    aid = _sent(store, street="Musterstr. 12")
+    r = store.find_dedup(L(platform="immowelt", ext_id="2", street="Musterstr. 12", postcode=""), 850)
+    assert (r.kind, r.match_id) == ("similar", aid)
+    # разные непустые PLZ — другая квартира
+    assert store.find_dedup(L(ext_id="3", street="Musterstr. 12", postcode="50667"), 850).kind == "new"
+
+
+def test_sent_at_none_is_filled_from_clock(store):
+    i = store.add(L(), 800)
+    store.set_status(i, "sent", sent_at=None)
+    assert store.get(i).sent_at == NOW
+    assert store.sent_count("kleinanzeigen", NOW - timedelta(hours=1)) == 1
