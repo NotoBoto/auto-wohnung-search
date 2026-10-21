@@ -15,6 +15,12 @@ HOST, PORT = "imap.gmail.com", 993
 SENDERS = {"kleinanzeigen.de": "kleinanzeigen", "wg-gesucht.de": "wggesucht",
            "immowelt.de": "immowelt", "immobilienscout24.de": "immoscout"}
 MAX_EXCERPT = 500
+NO_TEXT = "(текст ответа не найден в письме)"
+# страницы сообщений площадок для случая, когда в письме нет ссылки на диалог (адреса — лучшая догадка, вживую не проверены)
+INBOX = {"kleinanzeigen": "https://www.kleinanzeigen.de/m-nachrichten.html",
+         "wggesucht": "https://www.wg-gesucht.de/nachrichten.html",
+         "immowelt": "https://www.immowelt.de/",
+         "immoscout": "https://www.immobilienscout24.de/"}
 
 # письмо про новое сообщение: тема или строка «X hat Ihnen geschrieben»; рассылки и поисковые подписки не подходят
 _NEW_MSG = re.compile(r"neue\s+nachricht|nachricht\s+(?:zu|von|auf)\b|antwort\s+auf\s+(?:ihre|deine)\b|"
@@ -98,7 +104,7 @@ def _excerpt(text: str) -> str:
     intro = next((i for i, s in enumerate(lines) if _is_intro(s)), None)
     if intro is not None:   # приветствие и вводная строка площадки — не текст ответа
         lines = lines[intro + 1:]
-    elif lines and re.match(r"(?i)^(hallo|guten tag|hi)b[^.!?]{0,60}[,!]?$", next((s for s in lines if s), "")):
+    elif lines and re.match(r"(?i)^(hallo|guten tag|hi)\b[^.!?]{0,60}[,!]?$", next((s for s in lines if s), "")):
         lines = lines[1 + next(i for i, s in enumerate(lines) if s):]
     out = []
     for i, s in enumerate(lines):
@@ -138,9 +144,21 @@ def parse_notification(msg: Message) -> Reply | None:
         name = parseaddr(_dec(msg.get("From")))[0].strip()
         contact = "" if _BRANDS.search(name) else name
     excerpt = _excerpt(plain)
-    if not excerpt or not link:
+    # письмо площадки про новое сообщение не теряем никогда: нет текста/ссылки — подставляем запасные
+    return Reply(platform, ext_id, url, contact, excerpt or subject.strip() or NO_TEXT, link or INBOX[platform])
+
+
+def _fallback(msg: Message) -> Reply | None:
+    """Минимальный Reply, если разбор письма площадки упал."""
+    platform = _platform(msg)
+    if not platform:
         return None
-    return Reply(platform, ext_id, url, contact, excerpt, link)
+    try:
+        subject = _dec(msg.get("Subject")).strip()
+        name = parseaddr(_dec(msg.get("From")))[0].strip()
+    except Exception:
+        subject = name = ""
+    return Reply(platform, "", "", "" if _BRANDS.search(name) else name, subject or NO_TEXT, INBOX[platform])
 
 
 class MailWatcher:
@@ -180,18 +198,27 @@ class MailWatcher:
             if last is None:   # первый запуск: старую почту не разбираем
                 self.state["last_uid"] = max(self._uids(imap, "ALL"), default=0)
                 return []
+            last = int(last)
             out = []
-            for uid in sorted(u for u in self._uids(imap, f"UID {int(last) + 1}:*") if u > last):
-                typ, data = imap.uid("FETCH", str(uid), "(BODY.PEEK[])")
+            for uid in sorted(u for u in self._uids(imap, f"UID {last + 1}:*") if u > last):
+                try:
+                    typ, data = imap.uid("FETCH", str(uid), "(BODY.PEEK[])")
+                except Exception:   # обрыв связи: уже разобранное отдаём, это письмо заберём в следующий раз
+                    log.exception("mail: сбой при чтении письма uid=%s", uid)
+                    break
                 raw = next((d[1] for d in data or [] if isinstance(d, tuple)), None) if typ == "OK" else None
-                if raw:
-                    try:
-                        r = parse_notification(email.message_from_bytes(raw))
-                        if r:
-                            out.append(r)
-                    except Exception:
-                        log.exception("mail: письмо uid=%s не разобрано", uid)
-                self.state["last_uid"] = uid
+                if not raw:
+                    log.warning("mail: письмо uid=%s не получено, повтор в следующий раз", uid)
+                    break
+                msg = email.message_from_bytes(raw)
+                try:
+                    r = parse_notification(msg)
+                except Exception:
+                    log.exception("mail: письмо uid=%s не разобрано", uid)
+                    r = _fallback(msg)
+                if r:
+                    out.append(r)
+                self.state["last_uid"] = last = uid
             return out
         finally:
             self._close(imap)

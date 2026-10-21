@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from mail import MailWatcher, Reply, parse_notification
+import mail
+from mail import INBOX, NO_TEXT, MailWatcher, Reply, parse_notification
 
 FIX = Path(__file__).parent / "fixtures" / "mail"
 
@@ -148,3 +149,52 @@ def test_check_login():
     ok, msg = watcher(bad, {}).check_login()
     assert not ok and msg == "Неверный адрес или пароль приложения Gmail" and "secret-app-pw" not in msg
     assert bad.loggedout
+
+
+def eml(frm, subj, body):
+    return email.message_from_string(f"From: {frm}\nSubject: {subj}\nContent-Type: text/plain; charset=utf-8\n\n{body}")
+
+
+def test_empty_body_still_yields_reply_with_fallbacks():
+    r = parse_notification(eml("x <noreply@kleinanzeigen.de>", "Neue Nachricht zu Ihrer Anfrage", " \n"))
+    assert r.excerpt == "Neue Nachricht zu Ihrer Anfrage" and r.link == INBOX["kleinanzeigen"]
+    r2 = parse_notification(eml("x <noreply@immowelt.de>", "", "Anna hat Ihnen geschrieben:\n"))
+    assert r2.excerpt == NO_TEXT and r2.link == INBOX["immowelt"]
+
+
+def test_greeting_not_message_text():
+    link = "https://www.wg-gesucht.de/nachricht.html?id=1"
+    assert parse_notification(eml("x <noreply@wg-gesucht.de>", "Neue Nachricht", f"Hallo Max,\nWann passt es dir?\n{link}\n")).excerpt == "Wann passt es dir?"
+    assert parse_notification(eml("x <noreply@wg-gesucht.de>", "Neue Nachricht", f"Hinweis\n{link}\n")).excerpt == "Hinweis"   # «Hi…» без границы слова не приветствие
+
+
+class FlakyImap(FakeImap):
+    def __init__(self, mails, fail_uid, mode):
+        super().__init__(mails)
+        self.fail_uid, self.mode = fail_uid, mode
+
+    def uid(self, cmd, *args):
+        if cmd == "FETCH" and int(args[0]) == self.fail_uid:
+            if self.mode == "raise":
+                raise imaplib.IMAP4.abort("socket error")
+            return "NO", [b"temporary"]
+        return super().uid(cmd, *args)
+
+
+@pytest.mark.parametrize("mode", ["raise", "no"])
+def test_mid_batch_failure_keeps_earlier_replies_and_does_not_skip(mode):
+    fake = FlakyImap({1: raw("kleinanzeigen_reply.eml"), 2: raw("wggesucht_reply.eml"), 3: raw("immoscout_reply.eml")}, 2, mode)
+    state = {"last_uid": 0}
+    got = watcher(fake, state).fetch_new()
+    assert [r.platform for r in got] == ["kleinanzeigen"] and state["last_uid"] == 1
+    fake.fail_uid = None
+    assert [r.platform for r in watcher(fake, state).fetch_new()] == ["wggesucht", "immoscout"] and state["last_uid"] == 3
+
+
+def test_parse_exception_yields_minimal_reply(monkeypatch):
+    def boom(msg): raise ValueError("x")
+    monkeypatch.setattr(mail, "parse_notification", boom)
+    state = {"last_uid": 0}
+    got = watcher(FakeImap({1: raw("kleinanzeigen_reply.eml"), 2: raw("other.eml")}), state).fetch_new()
+    assert len(got) == 1 and got[0].platform == "kleinanzeigen" and got[0].link == INBOX["kleinanzeigen"]
+    assert got[0].excerpt.startswith("Sie haben eine neue Nachricht") and state["last_uid"] == 2
