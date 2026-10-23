@@ -36,9 +36,14 @@ class FakeLocator:
 
     async def fill(self, value: str):
         self.page.typed = value
+        self.page.filled[self.sel] = value
+
+    async def select_option(self, value: str):
+        self.page.selected[self.sel] = value
 
     async def press_sequentially(self, ch: str):
         self.page.typed += ch
+        self.page.filled[self.sel] = self.page.filled.get(self.sel, "") + ch
 
 
 class FakePage:
@@ -48,6 +53,8 @@ class FakePage:
         self.url = ""
         self.clicks: list[str] = []
         self.typed = ""
+        self.filled: dict[str, str] = {}     # селектор → введённый текст
+        self.selected: dict[str, str] = {}   # селектор → выбранное значение select
 
     def has(self, sel: str) -> bool:
         if sel == "__confirm__":
@@ -56,7 +63,7 @@ class FakePage:
 
     @property
     def submitted(self) -> bool:
-        return any("Senden" in c or "senden" in c for c in self.clicks)
+        return any("Senden" in c or "senden" in c or "Abschicken" in c for c in self.clicks)
 
     async def goto(self, url: str):
         self.url = self.fixed_url or url

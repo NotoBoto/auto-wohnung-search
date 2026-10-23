@@ -19,13 +19,23 @@ class Listing:
 
 PROFILE_FIELDS = ("salutation", "first_name", "last_name", "persons", "occupation",
                   "net_income", "move_in", "smoker", "pets", "wbs", "documents",
-                  "phone", "about", "hidden")   # hidden: поля, которые не раскрывать в первом письме
+                  "phone", "address", "about", "hidden")   # hidden: поля, которые не раскрывать в первом письме
+FORM_ONLY_FIELDS = ("address",)   # только для полей формы площадки, в текст письма не идут
 PROFILE_REQUIRED = ("salutation", "first_name", "last_name", "persons", "move_in", "about")
 
 
 def profile_complete(profile: dict) -> bool:
     # 0, None и пустая строка считаются незаполненным значением; остальные значения засчитываются
     return all(profile.get(k) not in (None, "", 0) for k in PROFILE_REQUIRED)
+
+
+_ADDRESS_RE = re.compile(r"^\s*(.+?)\s+(\d+\s*[a-zA-Z]?(?:\s*[-/]\s*\d+\s*[a-zA-Z]?)?)\s*,\s*(\d{5})\s+(.+?)\s*$")
+
+
+def parse_address(s: str) -> tuple[str, str, str, str] | None:
+    """«Musterstraße 5a, 53111 Bonn» → (улица, дом, индекс, город); None, если адрес не в этом виде."""
+    m = _ADDRESS_RE.match(s or "")
+    return tuple(re.sub(r"\s+", "", g) if i == 1 else g.strip() for i, g in enumerate(m.groups())) if m else None
 
 
 _MONEY_RE = re.compile(r"\d+(?:\.\d{3})*(?:,\d+)?")   # точка — разделитель тысяч только перед тремя цифрами

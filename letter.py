@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from ai import AIError  # noqa: F401  (пробрасывается из generate как есть)
-from models import Listing
+from models import FORM_ONLY_FIELDS, Listing
 
 MIN_LEN, MAX_LEN = 600, 1200
 DESCRIPTION_LIMIT = 3000
@@ -87,7 +87,7 @@ def build_user_message(l: Listing, profile: dict, form: str, wish: str = "",
               f"Anrede-Form: {form}", "", "Beschreibung:", (l.description or "")[:DESCRIPTION_LIMIT], "",
               "Profil des Mieters:"]
     lines += [f"{k}: {v}" for k, v in profile.items()
-              if k != "hidden" and k not in hidden and v not in (None, "")]
+              if k != "hidden" and k not in hidden and k not in FORM_ONLY_FIELDS and v not in (None, "")]
     if wish:
         lines += ["", f"Wunsch: {wish}"]
     if avoid_openings:

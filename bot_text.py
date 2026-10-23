@@ -5,7 +5,7 @@ import re
 from typing import Any
 from urllib.parse import quote_plus
 
-from models import PROFILE_FIELDS
+from models import PROFILE_FIELDS, parse_address
 
 SKIP = "-"   # ответ «пропустить» для необязательных полей профиля
 
@@ -120,6 +120,8 @@ PROFILE_STEPS: list[tuple[str, str]] = [
     ("wbs", f"Есть WBS? да/нет ({SKIP} — пропустить)"),
     ("documents", f"Какие документы готовы приложить, через запятую ({SKIP} — пропустить)?"),
     ("phone", f"Телефон ({SKIP} — пропустить)?"),
+    ("address", "Ваш текущий адрес для форм площадок (ImmoScout24 без него не отправит), в виде "
+                f"«Musterstraße 5, 53111 Bonn». В письмо он не попадает ({SKIP} — пропустить)?"),
     ("about", "Пара предложений о себе для письма (по-немецки или по-русски, нейросеть напишет письмо сама)?"),
 ]
 _REQUIRED = {"salutation", "first_name", "last_name", "persons", "move_in", "about"}
@@ -156,6 +158,10 @@ def parse_profile_answer(field: str, text: str) -> Any:
         if s.lower() in _NO:
             return False
         raise ValueError("Ответьте «да» или «нет».")
+    if field == "address":
+        if not parse_address(s):
+            raise ValueError("Нужен адрес в виде «Musterstraße 5, 53111 Bonn»: улица, номер дома, запятая, индекс и город.")
+        return s
     if field == "documents":
         items = [x.strip() for x in s.split(",") if x.strip()]
         if not items:

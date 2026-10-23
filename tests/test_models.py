@@ -25,3 +25,10 @@ def test_parse_lease_months_no_false_positive(t): assert parse_lease_months(t) i
 def test_profile_complete():
     p = {"salutation": "Herr", "first_name": "A", "last_name": "B", "persons": 2, "move_in": "01.01.2027", "about": "x"}
     assert profile_complete(p) and not profile_complete({**p, "about": ""})
+
+
+def test_parse_address():
+    from models import parse_address
+    assert parse_address("Musterstraße 5a, 53111 Bonn") == ("Musterstraße", "5a", "53111", "Bonn")
+    assert parse_address("Am Hof 12 - 14, 53113 Bonn") == ("Am Hof", "12-14", "53113", "Bonn")
+    assert parse_address("Bonn") is None and parse_address("") is None

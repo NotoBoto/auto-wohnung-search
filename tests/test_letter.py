@@ -183,3 +183,8 @@ def test_example_prompt_mentions_documents_only_from_profile():
     text = (core.RES / "prompt.example.txt").read_text(encoding="utf-8")
     line = next(s for s in text.splitlines() if "Unterlagen" in s)
     assert "documents" in line   # документы — только если они есть в профиле, иначе это выдумка
+
+
+def test_user_message_never_contains_form_only_address():
+    msg = build_user_message(L(), {**PROFILE, "address": "Musterstraße 5, 53111 Bonn"}, "Sie")
+    assert "Musterstraße" not in msg
