@@ -73,9 +73,11 @@ class ImmoScout(Source):
                  "&sso_return=https://www.immobilienscout24.de/sso/login.go?returnUrl%3D/geschlossenerbereich/start.html")
 
     def search_url(self, filters: dict) -> str:
-        # sorting=2 — «Aktualität (neueste zuerst)»; pricetype=calculatedtotalrent — фильтр по Gesamtmiete (проверено вживую)
+        # sorting=2 — «Aktualität (neueste zuerst)»; pricetype=calculatedtotalrent — фильтр по Gesamtmiete;
+        # numberofrooms=2.0- — «от 2 комнат» (всё проверено вживую)
+        rooms = f"numberofrooms={float(filters['min_rooms'])}-&" if filters.get("min_rooms") else ""
         price = f"price=-{int(filters['max_warm'])}.0&pricetype=calculatedtotalrent&" if filters.get("max_warm") else ""
-        return f"{BASE}/Suche/de/nordrhein-westfalen/bonn/wohnung-mieten?{price}sorting=2"
+        return f"{BASE}/Suche/de/nordrhein-westfalen/bonn/wohnung-mieten?{rooms}{price}sorting=2"
 
     @staticmethod
     def parse_search(html: str) -> list[Listing]:

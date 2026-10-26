@@ -84,6 +84,13 @@ def test_search_url_price_filter():
     assert s.search_url({"max_warm": 950}) == f"{URL}?price=-950.0&pricetype=calculatedtotalrent&sorting=2"
 
 
+def test_search_url_rooms_filter():
+    s = ImmoScout()
+    assert s.search_url({"min_rooms": 2}) == f"{URL}?numberofrooms=2.0-&sorting=2"
+    assert s.search_url({"min_rooms": 2.5, "max_warm": 900}) == \
+        f"{URL}?numberofrooms=2.5-&price=-900.0&pricetype=calculatedtotalrent&sorting=2"
+
+
 # ---------- объявление ----------
 
 def test_parse_detail_fixture():
