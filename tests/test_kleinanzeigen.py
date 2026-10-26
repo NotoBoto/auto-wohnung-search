@@ -218,3 +218,35 @@ async def test_send_listing_gone_redirects_to_search(fast):
     with pytest.raises(ListingGoneError):
         await Kleinanzeigen().send(page, AD, "Hallo", {})
     assert not page.submitted
+
+
+# форма объявлений Immobilien 2026-10-26: окно <dialog>, поля без name — по подписи, списки — combobox/option
+DLG = "dialog[open]"
+KA_DIALOG = ("#viewad-contact-button", DLG, f"{DLG} textarea", f"{DLG} >> textarea",
+             *(f"{DLG} >> label={t}" for t in ("Vorname", "Nachname", "Straße/Nr.", "PLZ", "Telefonnummer")),
+             f"{DLG} >> role=combobox[Anrede]", f"{DLG} >> role=combobox[Schufa]",
+             "role=option[Herr]", "role=option[Frau]", "role=option[Keine Angabe]",
+             f"{DLG} >> role=button[Nachricht senden]")
+KA_PROFILE = {"salutation": "Herr", "first_name": "Max", "last_name": "Muster", "phone": "0170 123",
+              "address": "Musterstraße 5a, 53111 Bonn"}
+
+
+async def test_send_fills_dialog_form(fast):
+    page = FakePage(KA_DIALOG)
+    await Kleinanzeigen().send(page, AD, "Hallo", KA_PROFILE)
+    f = page.filled
+    assert f[f"{DLG} >> textarea"] == "Hallo"
+    assert f[f"{DLG} >> label=Vorname"] == "Max" and f[f"{DLG} >> label=Nachname"] == "Muster"
+    assert f[f"{DLG} >> label=Straße/Nr."] == "Musterstraße 5a" and f[f"{DLG} >> label=PLZ"] == "53111"
+    assert f[f"{DLG} >> label=Telefonnummer"] == "0170 123"
+    # Anrede из профиля, Schufa в профиле нет — «Keine Angabe»
+    assert page.clicks.index(f"{DLG} >> role=combobox[Anrede]") < page.clicks.index("role=option[Herr]")
+    assert page.clicks.index(f"{DLG} >> role=combobox[Schufa]") < page.clicks.index("role=option[Keine Angabe]")
+    assert page.clicks[-1] == f"{DLG} >> role=button[Nachricht senden]"
+
+
+async def test_send_dialog_form_without_name_is_missing_field(fast):
+    page = FakePage(KA_DIALOG)
+    with pytest.raises(MissingFieldError) as e:
+        await Kleinanzeigen().send(page, AD, "Hallo", {**KA_PROFILE, "first_name": ""})
+    assert e.value.field == "first_name" and not any("Nachricht senden" in c for c in page.clicks)

@@ -3,7 +3,7 @@ import logging
 import re
 
 from browser import human_pause, human_type
-from models import Listing, parse_area, parse_money, parse_rooms
+from models import Listing, parse_address, parse_area, parse_money, parse_rooms
 from sources.base import BlockedError, ListingGoneError, MissingFieldError, NotSubmittedError, Source, SourceBroken, listing_flags
 
 log = logging.getLogger(__name__)
@@ -21,6 +21,10 @@ _IP_BAN_RE = re.compile(r"IP-Bereich[^<]{0,40}gesperrt|ip-eingeschraenkt", re.I)
 _NORMAL_MARKERS = ('id="viewad-title"', "srchrslt", "data-adid=")
 _LOGGED_IN = "[data-testid='logged-in-user']"   # «angemeldet als …» в шапке — пользователь вошёл
 _LOGIN_BUTTON = "[data-testid='login-button']"   # «Einloggen» в шапке — пользователь не вошёл (не проверено вживую)
+# форма объявлений Immobilien (снята вживую 2026-10-26): окно <dialog>, поля без name, id меняются при каждой загрузке —
+# ищем по подписи; «Anrede» и «Schufa Nachweis» — обязательные списки (combobox → option)
+_DIALOG = "dialog[open]"
+_ANREDE = {"Herr": "Herr", "Frau": "Frau"}   # иначе — «Keine Angabe»
 LOAD_WAIT_MS = 10000   # сколько ждать «load» после разметки; дольше — страница держится на рекламе
 
 
@@ -188,12 +192,43 @@ class Kleinanzeigen(Source):
             raise
         except Exception as e:   # до нажатия «Отправить» письмо точно не ушло
             raise NotSubmittedError(f"kleinanzeigen: форма не заполнена: {e}") from e
-        await page.locator("button[type='submit']:has-text('Senden'), button:has-text('Nachricht senden')").last.click()
+        dlg = page.locator(_DIALOG).first
+        if await dlg.count():
+            await dlg.get_by_role("button", name="Nachricht senden").first.click()
+        else:
+            await page.locator("button[type='submit']:has-text('Senden'), button:has-text('Nachricht senden')").last.click()
         ok = page.get_by_text(re.compile(r"Nachricht (wurde )?(erfolgreich )?(gesendet|verschickt)|erfolgreich (gesendet|verschickt)", re.I))
         try:
             await ok.first.wait_for(timeout=15000)
         except Exception as e:   # после нажатия исход неизвестен — не SourceBroken/NotSubmittedError
             raise RuntimeError("kleinanzeigen: подтверждение отправки не найдено") from e
+
+    async def _fill_dialog(self, page, dlg, profile: dict) -> None:
+        """Контактные поля новой формы; само письмо печатает _fill_form."""
+        for label, key in (("Vorname", "first_name"), ("Nachname", "last_name")):   # обязательные
+            if not profile.get(key):
+                raise MissingFieldError(key)
+            await self._type(dlg.get_by_label(label).first, profile[key])
+        if addr := parse_address(profile.get("address") or ""):   # «Ort» сайт подставляет сам по PLZ
+            await self._type(dlg.get_by_label("Straße/Nr.").first, f"{addr[0]} {addr[1]}")
+            await self._type(dlg.get_by_label("PLZ").first, addr[2])
+        if profile.get("phone"):
+            await self._type(dlg.get_by_label("Telefonnummer").first, profile["phone"])
+        await self._choose(page, dlg, "Anrede", _ANREDE.get(profile.get("salutation") or "", "Keine Angabe"))
+        await self._choose(page, dlg, "Schufa", "Keine Angabe")   # в профиле этого нет
+
+    @staticmethod
+    async def _type(loc, value) -> None:
+        if await loc.count() and not await loc.input_value():
+            await loc.focus()   # не click: подпись поля лежит поверх него и перехватывает клик
+            await human_type(loc, str(value))
+
+    @staticmethod
+    async def _choose(page, dlg, label: str, option: str) -> None:
+        box = dlg.get_by_role("combobox", name=re.compile(label)).first
+        if await box.count():
+            await box.click()
+            await page.get_by_role("option", name=option, exact=True).first.click(timeout=5000)
 
     async def _fill_form(self, page, l: Listing, text: str, profile: dict) -> None:
         """Всё до нажатия «Отправить»."""
@@ -203,18 +238,23 @@ class Kleinanzeigen(Source):
         if await page.locator(_LOGIN_BUTTON).count():   # сессия вышла: кнопка открыла бы окно входа
             raise BlockedError("logged_out", "kleinanzeigen: вход в аккаунт не выполнен")
         btn = page.locator("#viewad-contact-button-login-modal, #viewad-contact-button, button:has-text('Nachricht schreiben')").first
-        msg = page.locator("textarea[name='message'], #viewad-contact-message").first   # не любое поле: только форма сообщения
+        # не любое поле: только форма сообщения (старая — по name/id, новая — поле в окне)
+        msg = page.locator(f"textarea[name='message'], #viewad-contact-message, {_DIALOG} textarea").first
         try:
             await btn.click(timeout=8000)
             await msg.wait_for(state="visible", timeout=8000)
         except Exception as e:
             raise NotSubmittedError("kleinanzeigen: форма сообщения не найдена") from e
+        dlg = page.locator(_DIALOG).first
+        if await dlg.count():
+            await self._fill_dialog(page, dlg, profile)
+            msg = dlg.locator("textarea").first
         # обязательное поле «Telefon» (если форма его требует), а в профиле его нет
         phone = page.locator("input[name='phoneNumber'], input[type='tel']").first
         if await phone.count() and await phone.is_visible() and not await phone.input_value():
             if not profile.get("phone"):
                 raise MissingFieldError("phone")
             await human_type(phone, str(profile["phone"]))
-        await msg.click()
+        await msg.focus()   # в новой форме подпись лежит поверх поля и перехватывает click
         await human_type(msg, text)
         await human_pause()
