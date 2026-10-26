@@ -18,6 +18,11 @@ _MODEL_KEY = "resultListModel:"
 _TAG_RE = re.compile(r"<[^>]+>")
 _SALUTATION = {"Herr": "MALE", "Frau": "FEMALE"}
 _NO_PETS_RE = re.compile(r"^\s*(?:keine?|nein|нет|no|-)\s*$", re.I)
+_PERSONS = {1: "ONE_PERSON", 2: "TWO_PERSON"}   # больше двоих — семья или WG, по профилю не понять
+# список «Monatliches Haushaltsnettoeinkommen» (снят вживую 2026-10-26): верхняя граница включительно → значение
+_INCOME = [(499, "BELOW_500"), (1000, "OVER_500_UPTO_1000"), (1500, "OVER_1000_UPTO_1500"),
+           (2000, "OVER_1500_UPTO_2000"), (3000, "OVER_2000_UPTO_3000"), (4000, "OVER_3000_UPTO_4000"),
+           (5000, "OVER_4000_UPTO_5000")]
 # после «Abschicken»: текст подтверждения не проверен вживую
 _SENT_RE = re.compile(r"(Nachricht|Anfrage|Kontaktanfrage) (wurde )?(erfolgreich )?(gesendet|versendet|verschickt|übermittelt)|"
                       r"erfolgreich (gesendet|versendet|verschickt|übermittelt)", re.I)
@@ -73,9 +78,11 @@ class ImmoScout(Source):
                  "&sso_return=https://www.immobilienscout24.de/sso/login.go?returnUrl%3D/geschlossenerbereich/start.html")
 
     def search_url(self, filters: dict) -> str:
-        # sorting=2 — «Aktualität (neueste zuerst)»; pricetype=calculatedtotalrent — фильтр по Gesamtmiete (проверено вживую)
+        # sorting=2 — «Aktualität (neueste zuerst)»; pricetype=calculatedtotalrent — фильтр по Gesamtmiete;
+        # numberofrooms=2.0- — «от 2 комнат» (всё проверено вживую)
+        rooms = f"numberofrooms={float(filters['min_rooms'])}-&" if filters.get("min_rooms") else ""
         price = f"price=-{int(filters['max_warm'])}.0&pricetype=calculatedtotalrent&" if filters.get("max_warm") else ""
-        return f"{BASE}/Suche/de/nordrhein-westfalen/bonn/wohnung-mieten?{price}sorting=2"
+        return f"{BASE}/Suche/de/nordrhein-westfalen/bonn/wohnung-mieten?{rooms}{price}sorting=2"
 
     @staticmethod
     def parse_search(html: str) -> list[Listing]:
@@ -203,8 +210,11 @@ class ImmoScout(Source):
         await page.locator("form[data-testid='contact-form'] button[type='submit']:has-text('Abschicken')").last.click()
         try:
             await page.get_by_text(_SENT_RE).first.wait_for(timeout=20000)
-        except Exception as e:   # после нажатия исход неизвестен — не SourceBroken/NotSubmittedError
-            raise RuntimeError("immoscout: подтверждение отправки не найдено") from e
+        except Exception as e:
+            # сайт подсветил незаполненное поле (aria-invalid, вживую 2026-10-26) — форма не ушла
+            if await page.locator("form[data-testid='contact-form'] [aria-invalid='true']").count():
+                raise NotSubmittedError("immoscout: сайт не принял форму — поле не заполнено") from e
+            raise RuntimeError("immoscout: подтверждение отправки не найдено") from e   # исход неизвестен
 
     async def _field(self, page, testid: str, value) -> None:
         """Текстовое поле формы: печатаем, только если площадка не подставила значение сама."""
@@ -213,6 +223,12 @@ class ImmoScout(Source):
             return
         await loc.click()
         await human_type(loc, str(value))
+
+    async def _select(self, page, testid: str, value: str | None) -> None:
+        """Список формы: выбираем, только если площадка не выбрала значение сама."""
+        sel = page.locator(f"form[data-testid='contact-form'] select[data-testid='{testid}']").first
+        if value and await sel.count() and not await sel.input_value():
+            await sel.select_option(value)
 
     async def _fill_form(self, page, l: Listing, text: str, profile: dict) -> None:
         """Всё до нажатия «Abschicken»."""
@@ -245,12 +261,23 @@ class ImmoScout(Source):
             adults = page.locator("form[data-testid='contact-form'] input[data-testid='numberOfAdults']").first
             if await adults.count():
                 await adults.fill(str(profile["persons"]))
+        await self._select(page, "numberOfPersons", _PERSONS.get(profile.get("persons")))
         pets = profile.get("pets")
         if pets:
-            sel = page.locator("form[data-testid='contact-form'] select[data-testid='hasPets']").first
-            if await sel.count() and not await sel.input_value():
-                await sel.select_option("FALSE" if _NO_PETS_RE.match(str(pets)) else "TRUE")
+            has_pets = not _NO_PETS_RE.match(str(pets))
+            await self._select(page, "hasPets", "TRUE" if has_pets else "FALSE")
+            if has_pets:   # «Ja» открывает обязательное поле «Anzahl und Tierart» — оно появляется не сразу
+                try:
+                    await page.locator("form[data-testid='contact-form'] input[data-testid='petsInHousehold']") \
+                        .first.wait_for(state="visible", timeout=5000)
+                except Exception:
+                    pass   # нет поля — нечего заполнять
+                await self._field(page, "petsInHousehold", pets)
         await self._field(page, "incomeAmount", profile.get("net_income"))
+        if income := profile.get("net_income"):
+            await self._select(page, "income", next((v for top, v in _INCOME if income <= top), "OVER_5000"))
+        if re.search(r"sofort", str(profile.get("move_in") or ""), re.I):
+            await self._select(page, "moveInDateType", "FROM_NOW")
         await msg.click()
         await msg.fill("")   # убрать текст, подставленный площадкой
         await human_type(msg, text)

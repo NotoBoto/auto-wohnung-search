@@ -84,6 +84,13 @@ def test_search_url_price_filter():
     assert s.search_url({"max_warm": 950}) == f"{URL}?price=-950.0&pricetype=calculatedtotalrent&sorting=2"
 
 
+def test_search_url_rooms_filter():
+    s = ImmoScout()
+    assert s.search_url({"min_rooms": 2}) == f"{URL}?numberofrooms=2.0-&sorting=2"
+    assert s.search_url({"min_rooms": 2.5, "max_warm": 900}) == \
+        f"{URL}?numberofrooms=2.5-&price=-900.0&pricetype=calculatedtotalrent&sorting=2"
+
+
 # ---------- объявление ----------
 
 def test_parse_detail_fixture():
@@ -160,6 +167,13 @@ FORM_FIELDS = [f"{FORM} input[data-testid='{t}']" for t in
 FORM_PRESENT = {"button[data-testid='contact-button']", f"{FORM} textarea[data-testid='message']",
                 f"{FORM} select[data-testid='salutation']", f"{FORM} select[data-testid='hasPets']",
                 f"{FORM} button[type='submit']:has-text('Abschicken')", *FORM_FIELDS}
+# форма 2026-10-26: жильцы, доход, срок въезда — списки; при «Haustiere: Ja» появляется «Anzahl und Tierart»
+FORM_2026 = {"button[data-testid='contact-button']", f"{FORM} textarea[data-testid='message']",
+             f"{FORM} button[type='submit']:has-text('Abschicken')",
+             *(f"{FORM} select[data-testid='{t}']" for t in
+               ("salutation", "hasPets", "numberOfPersons", "income", "moveInDateType")),
+             *(f"{FORM} input[data-testid='{t}']" for t in
+               ("firstName", "lastName", "phoneNumber", "street", "houseNumber", "postcode", "city", "petsInHousehold"))}
 LISTING = Listing("immoscout", "171546247", "https://www.immobilienscout24.de/expose/171546247")
 
 
@@ -215,6 +229,34 @@ async def test_send_without_confirmation_is_unknown_outcome():
     with pytest.raises(RuntimeError) as e:
         await ImmoScout().send(page, LISTING, "Hallo", PROFILE)
     assert not isinstance(e.value, (NotSubmittedError, SourceBroken, BlockedError)) and page.submitted
+
+
+async def test_send_fills_2026_form_selects_and_pets():
+    page = FakePage(FORM_2026, html=EXPOSE)
+    profile = {**PROFILE, "pets": "Katze 5 Jahre alt", "net_income": 2400, "move_in": "ab sofort"}
+    await ImmoScout().send(page, LISTING, "Hallo", profile)
+    sel = lambda t: page.selected[f"{FORM} select[data-testid='{t}']"]
+    assert sel("hasPets") == "TRUE" and sel("numberOfPersons") == "TWO_PERSON"
+    assert sel("income") == "OVER_2000_UPTO_3000" and sel("moveInDateType") == "FROM_NOW"
+    assert page.filled[f"{FORM} input[data-testid='petsInHousehold']"] == "Katze 5 Jahre alt"
+    assert page.submitted
+
+
+@pytest.mark.parametrize("persons, income, value, bucket", [
+    (1, 499, "ONE_PERSON", "BELOW_500"), (1, 500, "ONE_PERSON", "OVER_500_UPTO_1000"),
+    (2, 3000, "TWO_PERSON", "OVER_2000_UPTO_3000"), (2, 6000, "TWO_PERSON", "OVER_5000")])
+async def test_send_maps_persons_and_income(persons, income, value, bucket):
+    page = FakePage(FORM_2026, html=EXPOSE)
+    await ImmoScout().send(page, LISTING, "Hallo", {**PROFILE, "persons": persons, "net_income": income})
+    assert page.selected[f"{FORM} select[data-testid='numberOfPersons']"] == value
+    assert page.selected[f"{FORM} select[data-testid='income']"] == bucket
+
+
+async def test_send_rejected_by_form_validation_is_not_submitted():
+    # сайт подсветил поле (aria-invalid) и не отправил: письмо точно не ушло
+    page = FakePage(FORM_2026 | {f"{FORM} [aria-invalid='true']"}, html=EXPOSE, confirm=False)
+    with pytest.raises(NotSubmittedError):
+        await ImmoScout().send(page, LISTING, "Hallo", PROFILE)
 
 
 def test_fixture_has_no_personal_data():

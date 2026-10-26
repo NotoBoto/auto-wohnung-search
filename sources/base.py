@@ -100,8 +100,8 @@ class Source(ABC):
 
     @abstractmethod
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
-        """Инвариант: BlockedError, MissingFieldError, NotSubmittedError и SourceBroken — только ДО нажатия
-        «Отправить» (письмо точно не ушло, Engine вернёт строку в очередь). Сбой после нажатия — любое другое
+        """Инвариант: BlockedError, MissingFieldError, NotSubmittedError и SourceBroken — только когда письмо точно
+        не ушло: до нажатия «Отправить» или если сайт отклонил форму (Engine вернёт строку в очередь). Иначе — любое другое
         исключение: исход неизвестен, Engine спросит владельца."""
 
     @abstractmethod
