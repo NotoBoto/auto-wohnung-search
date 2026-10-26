@@ -139,6 +139,16 @@ async def test_is_logged_in_captcha_raises():
 from fake_page import FakePage, fast_type, no_wait   # noqa: E402
 from sources.base import NotSubmittedError   # noqa: E402
 
+
+async def test_is_logged_in_by_user_marker_without_full_load():
+    page = FakePage(("[data-testid='logged-in-user']",))   # шапка «angemeldet als …» (проверено вживую)
+    assert await Kleinanzeigen().is_logged_in(page)
+    assert page.wait_until == "domcontentloaded"   # «load» главной ждёт рекламу дольше 30 с
+
+
+async def test_is_logged_in_false_without_user_marker():
+    assert not await Kleinanzeigen().is_logged_in(FakePage())
+
 KA_FORM = ("#viewad-contact-button", "textarea[name='message']", "button[type='submit']:has-text('Senden')")
 AD = Listing("kleinanzeigen", "1", "https://www.kleinanzeigen.de/s-anzeige/x/1-203-1")
 
