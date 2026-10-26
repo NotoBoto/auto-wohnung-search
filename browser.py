@@ -80,9 +80,13 @@ class Browser:
         pw = await self._playwright()
         udir = self._root / platform
         udir.mkdir(parents=True, exist_ok=True)
+        # без маркеров автоматизации: флаг --enable-automation, navigator.webdriver, эмуляция viewport
+        # (антибот Kleinanzeigen по ним отдаёт «IP-Bereich gesperrt», хотя обычный Edge с того же IP проходит)
         ctx = await pw.chromium.launch_persistent_context(
-            str(udir), channel="msedge", headless=False, args=["--window-position=-32000,-32000"],
-            locale="de-DE", viewport={"width": 1366, "height": 850})
+            str(udir), channel="msedge", headless=False, locale="de-DE", no_viewport=True,
+            ignore_default_args=["--enable-automation"],
+            args=["--window-position=-32000,-32000", "--window-size=1366,850",
+                  "--disable-blink-features=AutomationControlled"])
         # пользователь закрыл окно Edge: контекст мёртв, следующий page() запустит его заново
         ctx.on("close", lambda *_: self._ctx.get(platform) is ctx and self._ctx.pop(platform, None))
         self._ctx[platform] = ctx

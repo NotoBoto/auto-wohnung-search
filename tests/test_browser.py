@@ -81,3 +81,21 @@ async def test_show_login_holds_platform_lock(monkeypatch, tmp_path):
         await asyncio.sleep(0.05)
         assert not t.done()
     await asyncio.wait_for(t, 1)
+
+
+async def test_launch_hides_automation_markers(monkeypatch, tmp_path):
+    starts = patch(monkeypatch)
+    seen = {}
+
+    async def launch(udir, **kw):
+        seen.update(kw)
+        return FakeCtx()
+
+    b = B.Browser(tmp_path)
+    await b._playwright()
+    starts[0].chromium.launch_persistent_context = launch
+    await b.page("kleinanzeigen")
+    assert "--enable-automation" in seen["ignore_default_args"]
+    assert "--disable-blink-features=AutomationControlled" in seen["args"]
+    assert seen.get("no_viewport") is True and "viewport" not in seen
+    await b.close()
