@@ -1200,7 +1200,7 @@ class App(ctk.CTk):
             # капча появилась на проверке (ImmoScout — на выдаче): окно остаётся, владелец проходит её и жмёт «Готово»
             if isinstance(e, BlockedError) and e.kind == "captcha" and page is not None:
                 keep_shown = True
-                await page.bring_to_front()
+                await self.browser.show(key)   # окно могло уехать за экран, пока шла проверка
             raise
         finally:
             if not keep_shown:
