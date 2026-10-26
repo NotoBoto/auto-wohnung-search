@@ -39,6 +39,7 @@ from core import BASE
 from mail import MailWatcher
 from models import profile_complete
 from pipeline import Engine, to_local, to_utc
+from sources.base import BlockedError
 from sources.immoscout import ImmoScout
 from sources.kleinanzeigen import Kleinanzeigen
 from sources.wggesucht import WgGesucht
@@ -1183,6 +1184,7 @@ class App(ctk.CTk):
     async def _check_login(self, key: str, cls) -> bool:
         src = self.engine.sources[key] if self.engine else cls()
         page = None
+        keep_shown = False
         try:
             async with self.browser.lock(key):
                 page = await self.browser.page(key)
@@ -1195,12 +1197,17 @@ class App(ctk.CTk):
             log.warning("%s: проверка входа упала: %r", key, e)
             if page is not None:
                 await self._login_snapshot(key, page)
+            # капча появилась на проверке (ImmoScout — на выдаче): окно остаётся, владелец проходит её и жмёт «Готово»
+            if isinstance(e, BlockedError) and e.kind == "captcha" and page is not None:
+                keep_shown = True
+                await page.bring_to_front()
             raise
         finally:
-            try:
-                await self.browser.hide(key)   # окно снова уезжает за экран
-            except Exception:
-                pass
+            if not keep_shown:
+                try:
+                    await self.browser.hide(key)   # окно снова уезжает за экран
+                except Exception:
+                    pass
 
     @staticmethod
     async def _login_snapshot(key: str, page) -> None:
@@ -1222,6 +1229,12 @@ class App(ctk.CTk):
         btn.configure(text="Проверяю…", state="disabled")
 
         def done(ok, err):
+            if isinstance(err, BlockedError) and err.kind == "captcha":   # вход продолжается: окно на экране
+                btn.configure(text="Готово", state="normal")
+                log.info("%s: на проверке входа капча — жду, пока владелец её пройдёт", name)
+                self.say("warning", "Вход", f"{name} показал проверку «Ich bin kein Roboter». Пройдите её в окне Edge "
+                                         "и снова нажмите «Готово».")
+                return
             self.login_btns.pop(key, None)
             btn.configure(text="Войти", state="normal", fg_color=BTN_COLOR, hover_color=BTN_HOVER,
                           command=lambda: self.on_login(key))
