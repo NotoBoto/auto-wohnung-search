@@ -25,7 +25,7 @@ INBOX = {"kleinanzeigen": "https://www.kleinanzeigen.de/m-nachrichten.html",
 
 # письмо про новое сообщение: тема или строка «X hat Ihnen geschrieben»; рассылки и поисковые подписки не подходят
 _NEW_MSG = re.compile(r"neue\s+nachricht|nachricht\s+(?:zu|von|auf)\b|antwort\s+auf\s+(?:ihre|deine)\b|"
-                      r"hat\s+(?:ihnen|dir)\s+(?:geschrieben|geantwortet|eine\s+nachricht)|schreibt\s+(?:ihnen|dir)\b", re.I)
+                      r"hat\s+(?:ihnen|dir)\s+(?:geschrieben|geantwortet|eine\s+nachricht)|schreibt\s+(?:ihnen|dir|zu)\b", re.I)
 _URL = re.compile(r"https://[^\s<>\"')\]]+")
 # ссылки на объявление: ext_id как в sources/*
 _AD_URL = {
@@ -34,10 +34,12 @@ _AD_URL = {
     "immowelt": re.compile(r"https://(?:www\.)?immowelt\.de/expose/([\w-]+)"),
     "immoscout": re.compile(r"https://(?:www\.)?immobilienscout24\.de/expose/(\d+)"),
 }
+# ссылки на объявление в письме нет — номер из текста («Herr X schreibt zu Angebot 1234567:» у WG-Gesucht)
+_AD_TEXT = {"wggesucht": re.compile(r"\b(?:Angebot|Anzeige)\s+(?:Nr\.?\s*)?(\d{5,})\b")}
 _CONV_HINT = re.compile(r"nachricht|message|conversation|posteingang|inbox|anfrage|kontakt", re.I)
 _BRANDS = re.compile(r"kleinanzeigen|wg-gesucht|immowelt|immobilienscout|immoscout|noreply|no-reply|info", re.I)
 _CONTACT = [re.compile(r"(?:Nachricht von|Absender:)\s+(.{2,60}?)(?:\s+(?:erhalten|zu)\b|:?\s*$)", re.M),
-            re.compile(r"^\s*(.{2,60}?)\s+(?:hat\s+(?:Ihnen|dir)|schreibt\s+(?:Ihnen|dir))\b", re.M)]
+            re.compile(r"^\s*(.{2,60}?)(?:\s+\([^()\n]*\))?\s+(?:hat\s+(?:Ihnen|dir)|schreibt\s+(?:Ihnen|dir|zu))\b", re.M)]
 # с этой строки и ниже — цитата нашего письма или подвал
 _CUT = re.compile(r"^\s*(?:--+\s*$|_{3,}|-{2,}\s*(?:Urspr|Original)|Am .{5,80} schrieb|On .{5,80} wrote|Von:\s|"
                   r"(?:Ihre|Deine) (?:Nachricht|Anfrage)\s*:|Diese E-Mail wurde automatisch|Sie erhalten diese E-Mail|"
@@ -97,15 +99,17 @@ def _is_intro(s: str) -> bool:
 
 
 def _excerpt(text: str) -> str:
+    raw = text.splitlines()
+    # приветствие и вводная строка площадки — не текст ответа; у WG-Gesucht перед ней ещё шапка и линия «-----»
+    intro = next((i for i, s in enumerate(raw) if _is_intro(s.strip())), None)
+    if intro is not None:
+        raw = raw[intro + 1:]
     lines = []
-    for ln in text.splitlines():
+    for ln in raw:
         if _CUT.match(ln):
             break
         lines.append(ln.strip())
-    intro = next((i for i, s in enumerate(lines) if _is_intro(s)), None)
-    if intro is not None:   # приветствие и вводная строка площадки — не текст ответа
-        lines = lines[intro + 1:]
-    elif lines and re.match(r"(?i)^(hallo|guten tag|hi)\b[^.!?]{0,60}[,!]?$", next((s for s in lines if s), "")):
+    if intro is None and lines and re.match(r"(?i)^(hallo|guten tag|hi)\b[^.!?]{0,60}[,!]?$", next((s for s in lines if s), "")):
         lines = lines[1 + next(i for i, s in enumerate(lines) if s):]
     out = []
     for i, s in enumerate(lines):
@@ -133,8 +137,14 @@ def parse_notification(msg: Message) -> Reply | None:
         if m:
             ext_id, url = m.group(1), m.group(0)
             break
+    if not ext_id and platform in _AD_TEXT:
+        m = _AD_TEXT[platform].search(plain)
+        ext_id = m.group(1) if m else ""
     own = [u for u in urls if any(SENDERS[d] == platform and u.split("/")[2].endswith(d) for d in SENDERS)]
-    link = next((u for u in own if _CONV_HINT.search(u) and u != url), "") or next((u for u in own if u != url), "") or url
+    conv = [u for u in own if _CONV_HINT.search(u) and u != url]
+    # ссылка на сам диалог (с номером) лучше общей страницы сообщений
+    link = (next((u for u in conv if re.search(r"\d", u.split("/", 3)[-1])), "") or next(iter(conv), "")
+            or next((u for u in own if u != url), "") or url)
     contact = ""
     for rx in _CONTACT:
         m = rx.search(plain)

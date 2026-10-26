@@ -44,6 +44,14 @@ def test_wggesucht_fields():
     assert "Besichtigung am Dienstag" in r.excerpt and "schrieb" not in r.excerpt and "interessiere" not in r.excerpt
 
 
+def test_wggesucht_real_notification():
+    # настоящий формат WG-Gesucht (обезличен): ссылки на объявление нет, только «schreibt zu Angebot N», текст между линиями «-----»
+    r = parse_notification(load_eml("wggesucht_notification.eml"))
+    assert r.platform == "wggesucht" and r.ext_id == "1234567" and r.contact == "Herr Weber"
+    assert r.link == "https://www.wg-gesucht.de/nachricht.html?nachrichten-id=112233445"
+    assert r.excerpt.startswith("Guten Tag Max, vielen Dank für Ihr Interesse.") and r.excerpt.endswith("M. Weber")
+    assert "seit Ihrem letzten Login" not in r.excerpt and "vollständige Unterhaltung" not in r.excerpt
+
 def test_immowelt_and_immoscout_fields():
     iw = parse_notification(load_eml("immowelt_reply.eml"))
     assert iw.ext_id == "2a9bd4c1-7e3f-4a7b-9c11-5d0e8f6a1b22" and iw.contact == "Hausverwaltung Rhein GmbH"
