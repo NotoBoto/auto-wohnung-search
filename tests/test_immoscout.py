@@ -1,63 +1,222 @@
+import json
+import re
 from pathlib import Path
 
 import pytest
 
-from sources.base import SourceBroken
+from fake_page import FakePage, fast_type, no_wait
+from models import Listing
+from sources.base import BlockedError, MissingFieldError, NotSubmittedError, SourceBroken
 from sources.immoscout import ImmoScout
 
 FIX = Path(__file__).parent / "fixtures" / "immoscout"
 URL = "https://www.immobilienscout24.de/Suche/de/nordrhein-westfalen/bonn/wohnung-mieten"
+SEARCH = (FIX / "search.html").read_text(encoding="utf-8")
+EXPOSE = (FIX / "expose.html").read_text(encoding="utf-8")
+FORM = "form[data-testid='contact-form']"
+PROFILE = {"salutation": "Herr", "first_name": "Max", "last_name": "Muster", "persons": 2, "pets": "keine",
+           "net_income": 3200, "phone": "0170 123", "address": "Musterstraße 5a, 53111 Bonn"}
 
+
+def _search_with(entries) -> str:
+    model = {"searchResponseModel": {"resultlist.resultlist": {
+        "paging": {"numberOfHits": len(entries) if isinstance(entries, list) else 1},
+        "resultlistEntries": [{"resultlistEntry": entries}]}}}
+    return f"<script>IS24.resultList = {{ resultListModel: {json.dumps(model)} }};</script>"
+
+
+def _entry(id_, title="Schöne Wohnung", paywall=None) -> dict:
+    x = {"@id": id_, "title": title, "price": {"value": 700}, "calculatedTotalRent": {"totalRent": {"value": 900}}}
+    if paywall is not None:
+        x["paywallListing"] = {"active": paywall}
+    return {"@id": id_, "resultlist.realEstate": x}
+
+
+# ---------- выдача ----------
+
+def test_parse_search_fixture():
+    ls = ImmoScout.parse_search(SEARCH)
+    ids = [l.ext_id for l in ls]
+    assert len(ls) == 7 and "172001456" in ids
+    l = next(l for l in ls if l.ext_id == "172001456")
+    assert l.url == "https://www.immobilienscout24.de/expose/172001456"
+    assert l.title == "4-Zimmer-Wohnung in Bonn Castell (5311_32)"
+    assert (l.street, l.postcode, l.district) == ("Graurheindorfer Str. 6", "53111", "Castell")
+    assert (l.cold_rent, l.warm_rent, l.rooms, l.area) == (1076.82, 1491.82, 4.0, 98.34)
+    assert l.contact_name == "Daniela Nuber"
+
+
+def test_parse_search_skips_mieterplus_listings():
+    # первые дни объявление только для MieterPlus: вместо формы — страница оплаты
+    assert "172005218" not in [l.ext_id for l in ImmoScout.parse_search(SEARCH)]
+    ls = ImmoScout.parse_search(_search_with([_entry("1", paywall="true"), _entry("2", paywall="false"), _entry("3")]))
+    assert [l.ext_id for l in ls] == ["2", "3"]
+
+
+def test_parse_search_only_mieterplus_is_empty_not_broken():
+    assert ImmoScout.parse_search(_search_with([_entry("1", paywall="true")])) == []
+
+
+def test_parse_search_single_entry_object():
+    assert [l.ext_id for l in ImmoScout.parse_search(_search_with(_entry("5")))] == ["5"]
+
+
+def test_parse_search_swap_flag_from_title():
+    ls = ImmoScout.parse_search(SEARCH)
+    assert next(l for l in ls if l.ext_id == "172005594").is_swap
+
+
+def test_parse_search_empty_result():
+    html = _search_with([]).replace('"numberOfHits": 0', '"numberOfHits": 0')
+    assert ImmoScout.parse_search(html) == []
+
+
+def test_parse_search_unknown_markup_raises():
+    with pytest.raises(SourceBroken):
+        ImmoScout.parse_search("<html><body>Wohnung mieten</body></html>")
+    with pytest.raises(SourceBroken):
+        ImmoScout.parse_search("<script>resultListModel: {broken</script>")
+
+
+def test_search_url_price_filter():
+    s = ImmoScout()
+    assert s.search_url({}) == f"{URL}?sorting=2"
+    assert s.search_url({"max_warm": 950}) == f"{URL}?price=-950.0&pricetype=calculatedtotalrent&sorting=2"
+
+
+# ---------- объявление ----------
+
+def test_parse_detail_fixture():
+    l = ImmoScout.parse_detail(EXPOSE, Listing("immoscout", "171546247", "u"))
+    assert l.title == "Barrierefreie 4-Zimmer-Wohnung – flexibel für jede Lebensphase"
+    assert (l.cold_rent, l.extra_costs, l.heating_costs, l.warm_rent) == (1750.0, 430.0, 0.0, 2180.0)
+    assert (l.rooms, l.area, l.available_from, l.postcode) == (4.0, 124.0, "sofort", "53179")
+    assert l.description.startswith("Objektbeschreibung:\nDiese hochwertig ausgestattete Etagenwohnung")
+    assert "Ausstattung:\n- großzügiges" in l.description and "\nLage:\nDie Wohnung befindet sich" in l.description
+
+
+def test_parse_detail_keeps_search_postcode():
+    l = ImmoScout.parse_detail(EXPOSE, Listing("immoscout", "1", "u", postcode="53173"))
+    assert l.postcode == "53173"
+
+
+def test_parse_detail_unknown_markup_raises():
+    with pytest.raises(SourceBroken):
+        ImmoScout.parse_detail("<html></html>", Listing("immoscout", "1", "u"))
+
+
+# ---------- блокировки и вход ----------
 
 def test_detect_captcha():
-    html = (FIX / "captcha.html").read_text(encoding="utf-8")
-    assert ImmoScout.detect_block(html, URL) == "captcha"
+    assert ImmoScout.detect_block((FIX / "captcha.html").read_text(encoding="utf-8"), URL) == "captcha"
 
 
-def test_detect_block_ok_page():
-    assert ImmoScout.detect_block("<html><body><h1>Wohnung mieten in Bonn</h1></body></html>", URL) is None
+def test_detect_block_normal_pages():
+    assert ImmoScout.detect_block(SEARCH, URL) is None
+    assert ImmoScout.detect_block(EXPOSE, "https://www.immobilienscout24.de/expose/171546247") is None
 
 
-def test_identity_and_search_url():
-    s = ImmoScout()
-    assert s.name == "immoscout" and "immobilienscout24.de" in s.login_url
-    assert "bonn" in s.search_url({}).lower()
-
-
-def test_parse_search_not_implemented_raises():
-    with pytest.raises(SourceBroken):
-        ImmoScout.parse_search("<html></html>")
+def test_detect_logged_out_on_sso_page():
+    assert ImmoScout.detect_block("<html></html>", ImmoScout.login_url) == "logged_out"
 
 
 def test_hcaptcha_widget_on_normal_page_is_not_block():
     html = '<html><script src="https://js.hcaptcha.com/1/api.js"></script><div class="h-captcha"></div><a href="/expose/123">x</a></html>'
     assert ImmoScout.detect_block(html, URL) is None
-    assert ImmoScout.detect_block('<script src="https://js.hcaptcha.com/1/api.js"></script><form></form>', URL) is None
-
-
-class _Page:
-    url = URL
-
-    def __init__(self, html): self._h = html
-    async def content(self): return self._h
-
-
-async def test_is_logged_in_captcha_raises():
-    from sources.base import BlockedError
-    with pytest.raises(BlockedError) as e:
-        await ImmoScout().is_logged_in(_Page((FIX / "captcha.html").read_text(encoding="utf-8")))
-    assert e.value.kind == "captcha"
-
-
-async def test_parse_detail_and_send_raise_source_broken():
-    from models import Listing
-    l = Listing("immoscout", "1", "https://www.immobilienscout24.de/expose/1")
-    with pytest.raises(SourceBroken):
-        ImmoScout.parse_detail("<html></html>", l)
-    with pytest.raises(SourceBroken):
-        await ImmoScout().send(_Page(""), l, "hi", {})
 
 
 def test_challenge_page_with_expose_link_is_captcha():
     html = (FIX / "captcha.html").read_text(encoding="utf-8").replace("</body>", '<a href="/expose/123">x</a></body>')
     assert ImmoScout.detect_block(html, URL) == "captcha"
+
+
+class _Page:
+    def __init__(self, html, url=URL):
+        self._h, self.url = html, url
+
+    async def content(self):
+        return self._h
+
+
+async def test_is_logged_in():
+    assert await ImmoScout().is_logged_in(_Page(SEARCH)) is True
+    assert await ImmoScout().is_logged_in(_Page(SEARCH.replace('"loggedIn":true', '"loggedIn":false')
+                                                 .replace("loggedIn: true", "loggedIn: false"))) is False
+    # окно осталось на странице входа: переход на выдачу снова приводит туда
+    assert await ImmoScout().is_logged_in(FakePage(url=ImmoScout.login_url)) is False
+
+
+async def test_is_logged_in_captcha_raises():
+    with pytest.raises(BlockedError) as e:
+        await ImmoScout().is_logged_in(_Page((FIX / "captcha.html").read_text(encoding="utf-8")))
+    assert e.value.kind == "captcha"
+
+
+# ---------- отправка ----------
+
+FORM_FIELDS = [f"{FORM} input[data-testid='{t}']" for t in
+               ("firstName", "lastName", "phoneNumber", "street", "houseNumber", "postcode", "city",
+                "numberOfAdults", "incomeAmount")]
+FORM_PRESENT = {"button[data-testid='contact-button']", f"{FORM} textarea[data-testid='message']",
+                f"{FORM} select[data-testid='salutation']", f"{FORM} select[data-testid='hasPets']",
+                f"{FORM} button[type='submit']:has-text('Abschicken')", *FORM_FIELDS}
+LISTING = Listing("immoscout", "171546247", "https://www.immobilienscout24.de/expose/171546247")
+
+
+@pytest.fixture(autouse=True)
+def _fast(monkeypatch):
+    import sources.immoscout as m
+    monkeypatch.setattr(m, "human_type", fast_type)
+    monkeypatch.setattr(m, "human_pause", no_wait)
+
+
+async def test_send_fills_form_and_submits():
+    page = FakePage(FORM_PRESENT, html=EXPOSE)
+    await ImmoScout().send(page, LISTING, "Hallo", PROFILE)
+    f = page.filled
+    assert f[f"{FORM} textarea[data-testid='message']"] == "Hallo"
+    assert f[f"{FORM} input[data-testid='firstName']"] == "Max"
+    assert f[f"{FORM} input[data-testid='lastName']"] == "Muster"
+    assert f[f"{FORM} input[data-testid='street']"] == "Musterstraße"
+    assert f[f"{FORM} input[data-testid='houseNumber']"] == "5a"
+    assert f[f"{FORM} input[data-testid='postcode']"] == "53111"
+    assert f[f"{FORM} input[data-testid='city']"] == "Bonn"
+    assert f[f"{FORM} input[data-testid='numberOfAdults']"] == "2"
+    assert f[f"{FORM} input[data-testid='incomeAmount']"] == "3200"
+    assert page.selected == {f"{FORM} select[data-testid='salutation']": "MALE",
+                             f"{FORM} select[data-testid='hasPets']": "FALSE"}
+    assert page.clicks[0] == "button[data-testid='contact-button']"
+    assert page.submitted
+
+
+async def test_send_without_address_is_missing_field_before_submit():
+    page = FakePage(FORM_PRESENT, html=EXPOSE)
+    with pytest.raises(MissingFieldError) as e:
+        await ImmoScout().send(page, LISTING, "Hallo", {**PROFILE, "address": None})
+    assert e.value.field == "address" and not page.submitted
+
+
+async def test_send_without_form_is_not_submitted():
+    page = FakePage(set(), html=EXPOSE)
+    with pytest.raises(NotSubmittedError):
+        await ImmoScout().send(page, LISTING, "Hallo", PROFILE)
+    assert not page.submitted
+
+
+async def test_send_logged_out_raises_blocked():
+    page = FakePage(FORM_PRESENT, html=EXPOSE.replace("userLoggedIn: true", "userLoggedIn: false"))
+    with pytest.raises(BlockedError) as e:
+        await ImmoScout().send(page, LISTING, "Hallo", PROFILE)
+    assert e.value.kind == "logged_out" and not page.submitted
+
+
+async def test_send_without_confirmation_is_unknown_outcome():
+    page = FakePage(FORM_PRESENT, html=EXPOSE, confirm=False)
+    with pytest.raises(RuntimeError) as e:
+        await ImmoScout().send(page, LISTING, "Hallo", PROFILE)
+    assert not isinstance(e.value, (NotSubmittedError, SourceBroken, BlockedError)) and page.submitted
+
+
+def test_fixture_has_no_personal_data():
+    for f in FIX.glob("*.html"):
+        assert not re.search(r"@gmail\.com|yarbol", f.read_text(encoding="utf-8"), re.I), f.name

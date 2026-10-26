@@ -352,7 +352,7 @@ async def test_pause_resume(env):
 
 
 async def test_profile_wizard_completes_and_notifies_engine(env):
-    answers = ["Herr", "Max", "Muster", "2", "-", "-", "sofort", "-", "-", "-", "-", "-", "Ingenieur"]
+    answers = ["Herr", "Max", "Muster", "2", "-", "-", "sofort", "-", "-", "-", "-", "-", "-", "Ingenieur"]
     u, m = upd(OWNER)
     await env.bot.cmd_profile(u, ctx())
     assert "Herr или Frau" in m.replies[0]

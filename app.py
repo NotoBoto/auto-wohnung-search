@@ -39,6 +39,7 @@ from core import BASE
 from mail import MailWatcher
 from models import profile_complete
 from pipeline import Engine, to_local, to_utc
+from sources.immoscout import ImmoScout
 from sources.kleinanzeigen import Kleinanzeigen
 from sources.wggesucht import WgGesucht
 from store import Store
@@ -62,7 +63,7 @@ BACKENDS = {"Z.ai (бесплатно)": "zai", "Claude Code": "claude_code", "C
 DEFAULT_MODEL = "(по умолчанию)"
 # Площадки в окне: (ключ в cfg, название, класс источника или None — «скоро»; Engine такие пропускает)
 PLATFORM_ROWS = (("kleinanzeigen", "Kleinanzeigen", Kleinanzeigen), ("wggesucht", "WG-Gesucht", WgGesucht),
-                 ("immowelt", "Immowelt", None), ("immoscout", "ImmoScout24", None))
+                 ("immowelt", "Immowelt", None), ("immoscout", "ImmoScout24", ImmoScout))
 PLATFORM_NAMES = {k: n for k, n, _ in PLATFORM_ROWS}
 MAIL_HINT = ("Вход выполнен. Один раз включите в настройках аккаунта {name} e-mail-уведомления о новых "
              "сообщениях на адрес Gmail из этой программы — иначе ответы арендодателей не дойдут до бота.")
@@ -1021,7 +1022,7 @@ class App(ctk.CTk):
             "Переключатель у площадки — участвует ли она, когда нажимаете «▶ Запустить» сверху (во время работы "
             "действует сразу). «▶ Только эту» — запустить одну площадку; во время работы — добавить её к запуску. "
             "Всем остальным (черновики, фильтры, профиль, режим «авто / подтверждать») управляет Telegram-бот. "
-            "Immowelt и ImmoScout24 появятся в следующих версиях.")).pack(fill="x", padx=18, pady=(4, 0))
+            "Immowelt появится в следующих версиях.")).pack(fill="x", padx=18, pady=(4, 0))
 
     # ------------------------------------------------------------------ состояние площадок
 

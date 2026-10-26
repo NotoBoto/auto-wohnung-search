@@ -69,6 +69,10 @@ def test_parse_profile_answer():
     assert parse_profile_answer("salutation", "herr") == "Herr"
     assert parse_profile_answer("net_income", "3 200") == 3200
     assert parse_profile_answer("phone", "-") is None
+    assert parse_profile_answer("address", "Musterstraße 5, 53111 Bonn") == "Musterstraße 5, 53111 Bonn"
+    assert parse_profile_answer("address", "-") is None
+    with pytest.raises(ValueError):
+        parse_profile_answer("address", "Bonn")
 
 
 @pytest.mark.parametrize("field,text", [("persons", "много"), ("persons", "0"), ("wbs", "наверное"),
