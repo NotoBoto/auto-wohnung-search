@@ -140,6 +140,11 @@ from fake_page import FakePage, fast_type, no_wait   # noqa: E402
 from sources.base import NotSubmittedError   # noqa: E402
 
 
+def test_login_url_keeps_existing_session():
+    # m-einloggen.html у вошедшего пользователя сбрасывает access/refresh_token (проверено вживую)
+    assert "m-einloggen" not in Kleinanzeigen.login_url
+
+
 async def test_is_logged_in_by_user_marker_without_full_load():
     page = FakePage(("[data-testid='logged-in-user']",))   # шапка «angemeldet als …» (проверено вживую)
     assert await Kleinanzeigen().is_logged_in(page)

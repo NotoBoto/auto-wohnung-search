@@ -55,7 +55,7 @@ async def accept_consent(page) -> None:
 
 class Kleinanzeigen(Source):
     name = "kleinanzeigen"
-    login_url = f"{BASE}/m-einloggen.html"
+    login_url = f"{BASE}/"   # не m-einloggen.html: та сбрасывает сессию вошедшего пользователя
 
     def search_url(self, filters: dict) -> str:
         # фильтр по комнатам в URL не сработал (проверено вживую): min_rooms применяет Engine
