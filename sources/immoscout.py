@@ -188,17 +188,23 @@ class ImmoScout(Source):
         return self.parse_detail(await self._open(page, l.url), l)
 
     async def is_logged_in(self, page) -> bool:
-        """В странице выдачи есть "loggedIn":true (проверено вживую на аккаунте с входом)."""
-        if not page.url.startswith(BASE):
-            await page.goto(self.search_url({}))
-            await page.wait_for_load_state("load")
-            await accept_consent(page)
-        html = await page.content()
-        if kind := self.detect_block(html, page.url):
-            if kind != "logged_out":
-                raise BlockedError(kind)
-            return False
-        return bool(re.search(r'"loggedIn":\s*true|userLoggedIn:\s*true', html))
+        """В странице выдачи есть "loggedIn":true (проверено вживую на аккаунте с входом). На других страницах
+        признака нет (вживую 2026-10-26: после входа окно на «Mein Konto») — тогда проверяем на выдаче."""
+        for attempt in range(2):
+            if attempt or not page.url.startswith(BASE):
+                await page.goto(self.search_url({}))
+                await page.wait_for_load_state("load")
+                await accept_consent(page)
+            html = await page.content()
+            if kind := self.detect_block(html, page.url):
+                if kind != "logged_out":
+                    raise BlockedError(kind)
+                return False
+            if re.search(r'"loggedIn":\s*true|userLoggedIn:\s*true', html):
+                return True
+            if re.search(r'"loggedIn":\s*false|userLoggedIn:\s*false', html):
+                return False
+        return False
 
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
         try:

@@ -7,7 +7,7 @@ import pytest
 from fake_page import FakePage, fast_type, no_wait
 from models import Listing
 from sources.base import BlockedError, MissingFieldError, NotSubmittedError, SourceBroken
-from sources.immoscout import ImmoScout
+from sources.immoscout import BASE, ImmoScout
 
 FIX = Path(__file__).parent / "fixtures" / "immoscout"
 URL = "https://www.immobilienscout24.de/Suche/de/nordrhein-westfalen/bonn/wohnung-mieten"
@@ -151,6 +151,20 @@ async def test_is_logged_in():
                                                  .replace("loggedIn: true", "loggedIn: false"))) is False
     # окно осталось на странице входа: переход на выдачу снова приводит туда
     assert await ImmoScout().is_logged_in(FakePage(url=ImmoScout.login_url)) is False
+
+
+class _DashboardPage(FakePage):
+    """После входа окно стоит на «Mein Konto»: признака входа там нет, на выдаче — есть."""
+    async def goto(self, url, wait_until=None):
+        await super().goto(url, wait_until)
+        if "/Suche/" in url:
+            self.html = SEARCH
+
+
+async def test_is_logged_in_checks_search_page_when_marker_missing():
+    page = _DashboardPage(html="<html>angemeldet als …</html>")
+    page.url = f"{BASE}/meinkonto/dashboard/"
+    assert await ImmoScout().is_logged_in(page) is True and "/Suche/" in page.url
 
 
 async def test_is_logged_in_captcha_raises():
