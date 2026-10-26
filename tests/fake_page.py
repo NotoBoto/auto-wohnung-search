@@ -58,8 +58,9 @@ class FakePage:
     def submitted(self) -> bool:
         return any("Senden" in c or "senden" in c for c in self.clicks)
 
-    async def goto(self, url: str):
+    async def goto(self, url: str, wait_until=None):
         self.url = self.fixed_url or url
+        self.wait_until = wait_until
 
     async def wait_for_load_state(self, state=None):
         pass

@@ -1158,6 +1158,7 @@ class App(ctk.CTk):
 
         def opened(_, err):
             if err:
+                log.warning("%s: окно входа не открыто: %r", key, err)
                 self.login_btns.pop(key, None)
                 self._login_hold(key, False)
                 btn.configure(text="Войти", state="normal")
@@ -1180,14 +1181,38 @@ class App(ctk.CTk):
 
     async def _check_login(self, key: str, cls) -> bool:
         src = self.engine.sources[key] if self.engine else cls()
+        page = None
         try:
             async with self.browser.lock(key):
-                return await src.is_logged_in(await self.browser.page(key))
+                page = await self.browser.page(key)
+                ok = await src.is_logged_in(page)
+                log.info("%s: проверка входа — %s, страница %s", key, "вошёл" if ok else "не вошёл", page.url)
+                if not ok:
+                    await self._login_snapshot(key, page)
+                return ok
+        except Exception as e:
+            log.warning("%s: проверка входа упала: %r", key, e)
+            if page is not None:
+                await self._login_snapshot(key, page)
+            raise
         finally:
             try:
                 await self.browser.hide(key)   # окно снова уезжает за экран
             except Exception:
                 pass
+
+    @staticmethod
+    async def _login_snapshot(key: str, page) -> None:
+        """Скриншот и HTML страницы после неудачной проверки входа — в debug/."""
+        try:
+            d = BASE / "debug"
+            d.mkdir(parents=True, exist_ok=True)
+            base = d / f"{datetime.now():%Y%m%d-%H%M%S}-{key}-login"
+            base.with_suffix(".html").write_text(await page.content(), encoding="utf-8")
+            await page.screenshot(path=str(base.with_suffix(".png")), full_page=True)
+            log.info("%s: снимок страницы входа — debug/%s.png/.html", key, base.name)
+        except Exception as e:
+            log.debug("%s: снимок страницы входа не сделан: %s", key, e)
 
     def finish_login(self, key: str):
         cls = next(c for k, _, c in PLATFORM_ROWS if k == key)

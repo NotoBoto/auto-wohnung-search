@@ -73,7 +73,7 @@ async def test_show_login_holds_platform_lock(monkeypatch, tmp_path):
     async def move(*a): pass
     b._move = move
     pg = await b.page("kleinanzeigen")
-    async def goto(url): pass
+    async def goto(url, **kw): pass
     async def front(): pass
     pg.goto, pg.bring_to_front = goto, front
     async with b.lock("kleinanzeigen"):
@@ -81,3 +81,35 @@ async def test_show_login_holds_platform_lock(monkeypatch, tmp_path):
         await asyncio.sleep(0.05)
         assert not t.done()
     await asyncio.wait_for(t, 1)
+
+
+async def test_launch_hides_automation_markers(monkeypatch, tmp_path):
+    starts = patch(monkeypatch)
+    seen = {}
+
+    async def launch(udir, **kw):
+        seen.update(kw)
+        return FakeCtx()
+
+    b = B.Browser(tmp_path)
+    await b._playwright()
+    starts[0].chromium.launch_persistent_context = launch
+    await b.page("kleinanzeigen")
+    assert "--enable-automation" in seen["ignore_default_args"]
+    assert "--disable-blink-features=AutomationControlled" in seen["args"]
+    assert seen.get("no_viewport") is True and "viewport" not in seen
+    await b.close()
+
+
+async def test_show_login_does_not_wait_for_full_load(monkeypatch, tmp_path):
+    patch(monkeypatch)
+    b = B.Browser(tmp_path)
+    async def move(*a): pass
+    b._move = move
+    pg = await b.page("kleinanzeigen")
+    seen = {}
+    async def goto(url, **kw): seen.update(kw)
+    async def front(): pass
+    pg.goto, pg.bring_to_front = goto, front
+    await b.show_login("kleinanzeigen", "https://x")
+    assert seen.get("wait_until") == "domcontentloaded"   # «load» главной с рекламой — дольше 30 с

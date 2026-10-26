@@ -19,6 +19,7 @@ _BLOCK_RE = re.compile(r"geetest|captcha|Zugriff verweigert|Access Denied", re.I
 # Временная блокировка диапазона IP («IP-Bereich vorübergehend gesperrt») — не капча, её не решить
 _IP_BAN_RE = re.compile(r"IP-Bereich[^<]{0,40}gesperrt|ip-eingeschraenkt", re.I)
 _NORMAL_MARKERS = ('id="viewad-title"', "srchrslt", "data-adid=")
+_LOGGED_IN = "[data-testid='logged-in-user']"   # «angemeldet als …» в шапке — пользователь вошёл
 _LOGIN_BUTTON = "[data-testid='login-button']"   # «Einloggen» в шапке — пользователь не вошёл (не проверено вживую)
 
 
@@ -54,7 +55,7 @@ async def accept_consent(page) -> None:
 
 class Kleinanzeigen(Source):
     name = "kleinanzeigen"
-    login_url = f"{BASE}/m-einloggen.html"
+    login_url = f"{BASE}/"   # не m-einloggen.html: та сбрасывает сессию вошедшего пользователя
 
     def search_url(self, filters: dict) -> str:
         # фильтр по комнатам в URL не сработал (проверено вживую): min_rooms применяет Engine
@@ -160,16 +161,19 @@ class Kleinanzeigen(Source):
     async def fetch_detail(self, page, l: Listing) -> Listing:
         return self.parse_detail(await self._open(page, l.url), l)
 
-    # не проверено вживую — проверить после входа пользователя
     async def is_logged_in(self, page) -> bool:
-        """Выход из аккаунта: в шапке есть кнопка «Einloggen» (data-testid=login-button)."""
+        """Вход: в шапке «angemeldet als …» (data-testid=logged-in-user, проверено вживую).
+        Главную не ждём до «load»: реклама держит её дольше таймаута."""
         if "m-einloggen" in page.url or not page.url.startswith(BASE):
-            await page.goto(BASE)
-            await page.wait_for_load_state("load")
+            await page.goto(BASE, wait_until="domcontentloaded")
             await accept_consent(page)
         if kind := self.detect_block(await page.content(), page.url):
             raise BlockedError(kind)
-        return await page.locator(_LOGIN_BUTTON).count() == 0
+        try:
+            await page.locator(_LOGGED_IN).first.wait_for(timeout=10000)
+        except Exception:
+            return False
+        return True
 
     # не проверено вживую — проверить после входа пользователя
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
