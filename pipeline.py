@@ -20,7 +20,8 @@ from browser import human_pause
 from filters import check, estimate_warm, prefilter
 from letter import LetterError, generate_letter
 from models import Listing, profile_complete
-from sources.base import (TZ, AlreadyContactedError, BlockedError, MissingFieldError, NotSubmittedError,
+from sources.base import (TZ, AlreadyContactedError, BlockedError, ListingGoneError, MissingFieldError,
+                          NotSubmittedError,
                           RateLimiter, SourceBroken, poll_interval)
 from store import Row, Store, contact_key
 
@@ -32,6 +33,7 @@ MISSING_PROFILE_EVERY = timedelta(hours=24)
 GENERATING = "generating"   # reason у строки, зарезервированной на время генерации письма
 NO_PROFILE = "профиль не заполнен"   # reason у строки seen: ждёт профиля
 RECHECK_WINDOW = timedelta(hours=24)  # такие seen обрабатываем, когда профиль заполнен; столько же живёт повтор failed
+GONE = "объявление снято с сайта"   # reason у failed: отправлять было уже некуда
 LOAD_FAILED = "объявление не загрузилось"   # начало reason у failed без сбоя письма — такие не повторяем
 BLOCKING_KINDS = ("captcha", "logged_out", "blocked", "broken")   # эти случаи держат площадку на паузе
 SNAPSHOTS_KEEP = 40   # сколько файлов снимков страниц (png + html) хранить в debug_dir
@@ -367,6 +369,10 @@ class Engine:
             except BlockedError as e:
                 self.store.set_status(id, "queued")
                 await self._block(platform, e.kind, str(e))
+            except ListingGoneError:
+                self.store.set_status(id, "failed", reason=GONE)
+                log.info("%s: #%s не отправлено — объявление снято с сайта", platform, id)
+                await self._safe(self.notifier.gone(self.store.get(id)))
             except MissingFieldError as e:
                 await self._to_draft(id, row.letter, False, f"нет поля: {e.field} — заполните: /profile {e.field}")
             except (NotSubmittedError, SourceBroken) as e:

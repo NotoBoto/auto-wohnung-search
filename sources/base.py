@@ -48,6 +48,10 @@ class NotSubmittedError(RuntimeError):
     """Сбой отправки ДО нажатия «Отправить» (форма/кнопка не найдена, окно входа): письмо точно не ушло."""
 
 
+class ListingGoneError(RuntimeError):
+    """Объявление снято с сайта: письмо не ушло и уже не уйдёт, площадка при этом работает."""
+
+
 class AlreadyContactedError(RuntimeError):
     """С арендодателем уже есть переписка: новое письмо не пишем, объявление считается отправленным."""
 
@@ -100,7 +104,7 @@ class Source(ABC):
 
     @abstractmethod
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
-        """Инвариант: BlockedError, MissingFieldError, NotSubmittedError и SourceBroken — только когда письмо точно
+        """Инвариант: BlockedError, ListingGoneError, MissingFieldError, NotSubmittedError и SourceBroken — только когда письмо точно
         не ушло: до нажатия «Отправить» или если сайт отклонил форму (Engine вернёт строку в очередь). Иначе — любое другое
         исключение: исход неизвестен, Engine спросит владельца."""
 

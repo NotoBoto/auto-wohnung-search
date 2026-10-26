@@ -9,7 +9,7 @@ from ai import AIError
 from mail import Reply
 from models import Listing
 from pipeline import Engine
-from sources.base import BlockedError, MissingFieldError, NotSubmittedError, SourceBroken
+from sources.base import BlockedError, ListingGoneError, MissingFieldError, NotSubmittedError, SourceBroken
 from store import Store
 
 T0 = datetime(2026, 10, 21, 10, 0, 0)   # наивный UTC = 12:00 в Бонне (CEST)
@@ -109,6 +109,9 @@ class FakeNotifier:
 
     async def remove_draft(self, row):
         self.calls.append(("remove_draft", row.id))
+
+    async def gone(self, row):
+        self.calls.append(("gone", row.id))
 
 
 class FakeBrowser:
@@ -524,6 +527,18 @@ async def test_missing_required_field_becomes_draft_in_auto():
     await env.engine.send_queued_once()
     assert env.store.get(2).status == "draft" and len(env.notifier.names("draft")) == 2
     assert env.store.get(2).reason == "нет поля: phone — заполните: /profile phone"
+
+
+async def test_listing_gone_on_send_fails_row_without_pause():
+    env = Env(mode="auto")
+    await env.engine.process("kleinanzeigen", L())
+    env.ka.send_exc = ListingGoneError("снято")
+    await env.engine.send_queued_once()
+    # объявление сняли: письмо не ушло и не уйдёт; площадка работает дальше
+    row = env.store.get(1)
+    assert row.status == "failed" and row.reason == "объявление снято с сайта"
+    assert env.notifier.names("gone") == [("gone", 1)] and env.notifier.names("incident") == []
+    assert not env.engine._paused_now("kleinanzeigen")
 
 
 async def test_send_error_keeps_sending_and_asks_owner():

@@ -159,6 +159,13 @@ class TelegramNotifier:
     async def digest(self, stats: dict) -> None:
         self._push(format_digest(stats), silent=True)
 
+    async def gone(self, row: Row) -> None:
+        mark = "✗ Не отправлено: объявление снято с сайта"
+        if row.draft_msg_id:
+            self._enqueue(lambda: self._edit(row.draft_msg_id, format_done(row, mark)))
+        else:
+            self._push(format_done(row, mark))
+
     async def remove_draft(self, row: Row) -> None:
         if not row.draft_msg_id:
             return
@@ -450,7 +457,8 @@ class OwnerBot:
         status = self.store.get(id).status
         return {"sent": "✓ Отправлено", "queued": "⏳ В очереди на отправку (лимит или пауза)",
                 "sending": "? Не ясно, ушло ли — см. вопрос ниже",
-                "draft": "✎ Нужна правка — см. новый черновик"}.get(status, f"Не отправлено (статус: {status})")
+                "draft": "✎ Нужна правка — см. новый черновик",
+                "failed": "✗ Не отправлено: " + (self.store.get(id).reason or "сбой")}.get(status, f"Не отправлено (статус: {status})")
 
     def _dup_outcome(self, id: int) -> str:
         status = self.store.get(id).status

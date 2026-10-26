@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from models import Listing
-from sources.base import BlockedError, MissingFieldError, SourceBroken
+from sources.base import BlockedError, ListingGoneError, MissingFieldError, SourceBroken
 from sources.kleinanzeigen import Kleinanzeigen
 
 FIX = Path(__file__).parent / "fixtures"
@@ -210,3 +210,11 @@ async def test_send_does_not_wait_for_ads_load(fast):
     page = SlowAdsPage(KA_FORM)
     await Kleinanzeigen().send(page, AD, "Hallo", {})
     assert page.wait_until == "domcontentloaded" and page.typed == "Hallo" and page.submitted
+
+
+async def test_send_listing_gone_redirects_to_search(fast):
+    # снятое объявление отдаёт 301 на выдачу категории (вживую 2026-10-26)
+    page = FakePage(KA_FORM, url="https://www.kleinanzeigen.de/s-wohnung-mieten/weststadt/c203l1042")
+    with pytest.raises(ListingGoneError):
+        await Kleinanzeigen().send(page, AD, "Hallo", {})
+    assert not page.submitted

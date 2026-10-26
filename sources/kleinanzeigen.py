@@ -4,7 +4,7 @@ import re
 
 from browser import human_pause, human_type
 from models import Listing, parse_area, parse_money, parse_rooms
-from sources.base import BlockedError, MissingFieldError, NotSubmittedError, Source, SourceBroken, listing_flags
+from sources.base import BlockedError, ListingGoneError, MissingFieldError, NotSubmittedError, Source, SourceBroken, listing_flags
 
 log = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ class Kleinanzeigen(Source):
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
         try:
             await self._fill_form(page, l, text, profile)
-        except (BlockedError, MissingFieldError, NotSubmittedError):
+        except (BlockedError, ListingGoneError, MissingFieldError, NotSubmittedError):
             raise
         except Exception as e:   # до нажатия «Отправить» письмо точно не ушло
             raise NotSubmittedError(f"kleinanzeigen: форма не заполнена: {e}") from e
@@ -198,6 +198,8 @@ class Kleinanzeigen(Source):
     async def _fill_form(self, page, l: Listing, text: str, profile: dict) -> None:
         """Всё до нажатия «Отправить»."""
         await self._open(page, l.url)
+        if "/s-anzeige/" not in page.url:   # снятое объявление отдаёт 301 на выдачу категории (вживую 2026-10-26)
+            raise ListingGoneError(f"kleinanzeigen: объявление снято, открылось {page.url}")
         if await page.locator(_LOGIN_BUTTON).count():   # сессия вышла: кнопка открыла бы окно входа
             raise BlockedError("logged_out", "kleinanzeigen: вход в аккаунт не выполнен")
         btn = page.locator("#viewad-contact-button-login-modal, #viewad-contact-button, button:has-text('Nachricht schreiben')").first
