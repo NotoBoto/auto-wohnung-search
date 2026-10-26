@@ -523,6 +523,7 @@ async def test_missing_required_field_becomes_draft_in_auto():
     assert await env.engine.process("kleinanzeigen", L(ext_id="2", street="Andere Str. 1")) == "queued"
     await env.engine.send_queued_once()
     assert env.store.get(2).status == "draft" and len(env.notifier.names("draft")) == 2
+    assert env.store.get(2).reason == "нет поля: phone — заполните: /profile phone"
 
 
 async def test_send_error_keeps_sending_and_asks_owner():

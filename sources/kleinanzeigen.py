@@ -21,6 +21,7 @@ _IP_BAN_RE = re.compile(r"IP-Bereich[^<]{0,40}gesperrt|ip-eingeschraenkt", re.I)
 _NORMAL_MARKERS = ('id="viewad-title"', "srchrslt", "data-adid=")
 _LOGGED_IN = "[data-testid='logged-in-user']"   # «angemeldet als …» в шапке — пользователь вошёл
 _LOGIN_BUTTON = "[data-testid='login-button']"   # «Einloggen» в шапке — пользователь не вошёл (не проверено вживую)
+LOAD_WAIT_MS = 10000   # сколько ждать «load» после разметки; дольше — страница держится на рекламе
 
 
 def _text(s: str) -> str:
@@ -147,8 +148,12 @@ class Kleinanzeigen(Source):
         return None
 
     async def _open(self, page, url: str) -> str:
-        await page.goto(url)
-        await page.wait_for_load_state("load")
+        # «load» ждёт рекламу и бывает дольше 30 с (вживую на объявлении 2026-10-26): ждём разметку, «load» — недолго
+        await page.goto(url, wait_until="domcontentloaded")
+        try:
+            await page.wait_for_load_state("load", timeout=LOAD_WAIT_MS)
+        except Exception:
+            pass
         await accept_consent(page)
         html = await page.content()
         if kind := self.detect_block(html, page.url):

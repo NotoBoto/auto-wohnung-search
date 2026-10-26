@@ -197,3 +197,16 @@ async def test_send_ignores_unrelated_textarea(fast):
     with pytest.raises(NotSubmittedError):
         await Kleinanzeigen().send(page, AD, "Hallo", {})
     assert page.typed == "" and not page.submitted
+
+
+class SlowAdsPage(FakePage):
+    """Реклама держит событие «load» дольше таймаута."""
+    async def wait_for_load_state(self, state=None, **kw):
+        if state == "load":
+            raise TimeoutError("Timeout 30000ms exceeded")
+
+
+async def test_send_does_not_wait_for_ads_load(fast):
+    page = SlowAdsPage(KA_FORM)
+    await Kleinanzeigen().send(page, AD, "Hallo", {})
+    assert page.wait_until == "domcontentloaded" and page.typed == "Hallo" and page.submitted
