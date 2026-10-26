@@ -154,7 +154,7 @@ class Browser:
             page = await self.page(platform)
             await self._taskbar(platform, True)
             await self._move(platform, ONSCREEN)
-            await page.goto(url)
+            await page.goto(url, wait_until="domcontentloaded")   # «load» страниц с рекламой — дольше таймаута
             await page.bring_to_front()
 
     async def hide(self, platform: str) -> None:

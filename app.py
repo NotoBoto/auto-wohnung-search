@@ -1158,6 +1158,7 @@ class App(ctk.CTk):
 
         def opened(_, err):
             if err:
+                log.warning("%s: окно входа не открыто: %r", key, err)
                 self.login_btns.pop(key, None)
                 self._login_hold(key, False)
                 btn.configure(text="Войти", state="normal")
