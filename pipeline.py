@@ -368,7 +368,7 @@ class Engine:
                 self.store.set_status(id, "queued")
                 await self._block(platform, e.kind, str(e))
             except MissingFieldError as e:
-                await self._to_draft(id, row.letter, False, f"нет поля: {e.field}")
+                await self._to_draft(id, row.letter, False, f"нет поля: {e.field} — заполните: /profile {e.field}")
             except (NotSubmittedError, SourceBroken) as e:
                 # до нажатия «Отправить»: письмо точно не ушло — назад в очередь, площадка на паузе
                 self.store.set_status(id, "queued")
