@@ -1,3 +1,5 @@
+import json
+
 import core
 
 
@@ -58,3 +60,15 @@ def test_load_config_backs_up_corrupt_file(tmp_path, monkeypatch, caplog):
     path.write_text("{}", encoding="utf-8")
     core.load_config()
     assert core.config_backup is None
+
+
+def test_load_config_moves_retired_defaults_only(tmp_path, monkeypatch):
+    f = tmp_path / "config.json"
+    monkeypatch.setattr(core, "CONFIG_FILE", f)
+    f.write_text(json.dumps({"draft_ttl_hours": 12, "platforms": {"immoscout": {"poll": [300, 480]},
+                                                                  "wggesucht": {"poll": [300, 480]}}}), encoding="utf-8")
+    cfg = core.load_config()
+    assert cfg["draft_ttl_hours"] == 24 and cfg["platforms"]["immoscout"]["poll"] == [600, 1200]
+    assert cfg["platforms"]["wggesucht"]["poll"] == [300, 480]   # не прежнее значение по умолчанию — своё
+    f.write_text(json.dumps({"draft_ttl_hours": 6}), encoding="utf-8")
+    assert core.load_config()["draft_ttl_hours"] == 6

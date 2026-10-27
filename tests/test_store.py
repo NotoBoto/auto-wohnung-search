@@ -189,7 +189,7 @@ def test_day_stats(store):
     store.add_reply(ids[0], "Termin?", "https://x/r")
     s = store.day_stats(date(2026, 10, 21))
     assert s == {"found": 6, "sent": 1, "filtered": {"WG": 2, "WBS": 1},
-                 "duplicates": 1, "replies": 1, "failed": 1}
+                 "duplicates": 1, "replies": 1, "failed": 1, "expired": 0, "skipped": 0}
     assert store.day_stats(date(2026, 10, 20))["found"] == 0
 
 

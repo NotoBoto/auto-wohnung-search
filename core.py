@@ -34,18 +34,26 @@ DEFAULTS = {
     "bot_token": "", "owner_chat_id": 0,
     "gmail_user": "", "gmail_app_password": "", "mail_poll_sec": 90,
     "mode": "confirm",             # confirm | auto — глобально, площадка может переопределить
-    "digest_hour": 20, "draft_ttl_hours": 12,
+    "digest_hour": 20, "draft_ttl_hours": 24, "draft_remind_hours": 2,
     "filters": {"city": "Bonn", "max_warm": 900, "min_rooms": 2.0, "min_lease_months": 12},
     "profile": {},
     "platforms": {
         "kleinanzeigen": {"enabled": True, "mode": None, "daily_cap": 15, "min_gap_sec": 120, "poll": [180, 360]},
         "wggesucht":     {"enabled": True, "mode": None, "daily_cap": 15, "min_gap_sec": 120, "poll": [180, 360]},
         "immowelt":      {"enabled": True, "mode": None, "daily_cap": 15, "min_gap_sec": 120, "poll": [180, 360]},
-        "immoscout":     {"enabled": True, "mode": None, "daily_cap": 10, "min_gap_sec": 240, "poll": [300, 480]},
+        # реже остальных: при частом опросе ImmoScout показывает «Ich bin kein Roboter» (вживую 2026-10-27)
+        "immoscout":     {"enabled": True, "mode": None, "daily_cap": 10, "min_gap_sec": 240, "poll": [600, 1200]},
     },
     "night_poll": [900, 1200], "contact_cap_7d": 3, "dedup_days": 60,
     "auto_update": True, "autostart": False,
 }
+
+# прежние значения по умолчанию → новые: config.json хранит все ключи, поэтому новое значение само не придёт.
+# Меняем, только если значение осталось прежним по умолчанию (своё значение владельца не трогаем).
+_RETIRED_DEFAULTS = (
+    (("draft_ttl_hours",), 12, 24),
+    (("platforms", "immoscout", "poll"), [300, 480], [600, 1200]),
+)
 
 log = logging.getLogger("wohnung")
 
@@ -86,6 +94,13 @@ def load_config() -> dict:
                     cfg["platforms"].setdefault(name, {}).update(pv)
         else:
             cfg[k] = v
+    for path, old, new in _RETIRED_DEFAULTS:
+        *parents, key = path
+        d = cfg
+        for p in parents:
+            d = d.get(p) if isinstance(d, dict) else None
+        if isinstance(d, dict) and d.get(key) == old:
+            d[key] = new
     return cfg
 
 

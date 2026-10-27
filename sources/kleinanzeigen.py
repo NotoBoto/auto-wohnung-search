@@ -161,6 +161,16 @@ class Kleinanzeigen(Source):
     async def search(self, page) -> list[Listing]:
         return self.parse_search(await self._open(page, self.search_url(self.filters)))
 
+    def page_url(self, filters: dict, n: int) -> str:
+        """Страница n выдачи — в том виде, в каком сайт сам строит ссылку «Seite n» (взято из выдачи 2026-10)."""
+        price = f"preis::{int(filters['max_warm'])}/" if filters.get("max_warm") else ""
+        return f"{BASE}/s-wohnung-mieten/bonn/sortierung:neuste/{price}seite:{n}/{BONN_LOC}"
+
+    async def search_more(self, page, n: int) -> list[Listing]:
+        """Страница n ≥ 2. Фильтр сайта «Kein Tausch» не используем: у большинства объявлений поле не заполнено,
+        и фильтр их прячет (в выдаче 2026-10: 60 «Kein Tausch» + 7 «Nur Tausch» из 175)."""
+        return self.parse_search(await self._open(page, self.page_url(self.filters, n)))
+
     async def fetch_detail(self, page, l: Listing) -> Listing:
         return self.parse_detail(await self._open(page, l.url), l)
 

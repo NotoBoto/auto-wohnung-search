@@ -152,6 +152,30 @@ async def test_remove_old_draft_strips_buttons_when_delete_refused(tmp_path):
     assert bot.edited[0]["text"].startswith("— Неактуально") and bot.edited[0]["reply_markup"] is None
 
 
+async def test_expire_draft_collapses_with_restore_button(tmp_path):
+    store, id = make_store(tmp_path)
+    store.set_status(id, "skipped", reason="черновик устарел", draft_msg_id=555)
+    bot = FakeBot()
+    n = notifier(bot)
+    await n.expire_draft(store.get(id))
+    await n.drain()
+    await n.stop()
+    e = bot.edited[0]
+    assert e["message_id"] == 555 and e["text"].startswith("⌛ Черновик устарел")
+    assert [b.callback_data for r in e["reply_markup"].inline_keyboard for b in r] == [f"restore:{id}"]
+
+
+async def test_draft_reminder_lists_drafts(tmp_path):
+    store, id = make_store(tmp_path)
+    bot = FakeBot()
+    n = notifier(bot)
+    await n.draft_reminder([store.get(id)], 2)
+    await n.drain()
+    await n.stop()
+    text = bot.sent[0]["text"]
+    assert "1 черновик" in text and "2 ч" in text and f"#{id}" in text and "Titel" in text
+
+
 # ---------- OwnerBot ----------
 
 class FakeEngine:
@@ -159,6 +183,10 @@ class FakeEngine:
         self.store, self.calls = store, []
 
     def mode_for(self, p): return "confirm"
+
+    def rescan(self):
+        self.calls.append(("rescan",))
+        return self.rescan_result
     def pause(self, p): self.calls.append(("pause", p))
     def resume(self, p): self.calls.append(("resume", p))
     def status(self): return {"paused": [], "paused_all": False, "modes": {}, "incidents": [], "drafts": 0,
@@ -175,6 +203,10 @@ class FakeEngine:
     async def skip(self, id):
         self.calls.append(("skip", id))
         self.store.set_status(id, "skipped")
+
+    async def restore(self, id):
+        self.calls.append(("restore", id))
+        return self.restore_result
 
     async def resolve_duplicate(self, id, send): self.calls.append(("dup", id, send))
     async def resolve_stuck(self, id, was_sent): self.calls.append(("stuck", id, was_sent))
@@ -238,7 +270,7 @@ def env(tmp_path, monkeypatch):
 async def test_stranger_gets_no_reply_from_any_handler(env):
     for name, args in [("cmd_start", []), ("cmd_status", []), ("cmd_pause", []), ("cmd_mode", ["auto"]),
                        ("cmd_filters", ["max_warm", "1"]), ("cmd_profile", []), ("cmd_prompt", []),
-                       ("cmd_cancel", []), ("on_text", [])]:
+                       ("cmd_cancel", []), ("cmd_rescan", []), ("on_text", [])]:
         u, m = upd(STRANGER, "hi")
         await getattr(env.bot, name)(u, ctx(*args))
         assert m.replies == [], name
@@ -284,6 +316,19 @@ async def test_skip_button(env):
     await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
     assert env.engine.calls == [("skip", env.id)] and "Пропущено" in q.edits[0][0] and q.edits[0][1] is None
     assert "draft text" not in q.edits[0][0]
+
+
+@pytest.mark.parametrize("result,text", [("draft", None), ("load_failed", "сняли с сайта"),
+                                         ("filtered", "Больше не подходит")])
+async def test_restore_button(env, result, text):
+    env.engine.restore_result = result
+    q = Query(f"restore:{env.id}")
+    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
+    assert env.engine.calls == [("restore", env.id)] and "Возвращаю" in q.edits[0][0]
+    if text is None:   # новый черновик заменил сообщение — больше не трогаем
+        assert len(q.edits) == 1
+    else:
+        assert text in q.edits[-1][0] and q.edits[-1][1] is None
 
 
 @pytest.mark.parametrize("data,expected", [
@@ -500,3 +545,12 @@ async def test_send_button_on_processed_draft_does_nothing(env):
     await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
     await env.bot.drain()
     assert env.engine.calls == [] and "Отправлено" in q.edits[-1][0]
+
+
+@pytest.mark.parametrize("result,text", [(["kleinanzeigen", "immoscout"], "kleinanzeigen, immoscout"),
+                                         ([], "Нет работающих")])
+async def test_rescan_command(env, result, text):
+    env.engine.rescan_result = result
+    u, m = upd(OWNER)
+    await env.bot.cmd_rescan(u, ctx())
+    assert env.engine.calls == [("rescan",)] and text in m.replies[0]

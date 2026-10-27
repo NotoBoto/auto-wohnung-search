@@ -12,7 +12,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 from telegram.request import HTTPXRequest
 
 import core
-from bot_text import (PROFILE_STEPS, format_digest, format_done, format_draft, format_incident, format_profile, format_reply,
+from bot_text import (PROFILE_STEPS, format_digest, format_done, format_draft, format_draft_reminder, format_incident, format_profile, format_reply,
                       format_status, parse_filters_args, parse_profile_answer)
 from models import PROFILE_FIELDS, profile_complete
 from store import Row, Store
@@ -27,7 +27,9 @@ _QUESTIONS = dict(PROFILE_STEPS)
 HELP = ("Команды:\n/status — состояние\n/pause [площадка], /resume [площадка]\n"
         "/mode auto|confirm [площадка]\n/filters [max_warm 950 min_rooms 3 min_lease_months 12]\n"
         "/profile — заполнить или показать; /profile <поле> [значение]; /profile hide|show <поле>\n"
-        "/prompt — показать промпт; ответом на сообщение с текстом — заменить\n/cancel — отменить ввод")
+        "/prompt — показать промпт; ответом на сообщение с текстом — заменить\n"
+        "/rescan — пройти заново: черновики по всем подходящим объявлениям, по которым письмо не ушло\n"
+        "/cancel — отменить ввод")
 
 
 def _scrub(text: str, token: str) -> str:
@@ -136,11 +138,11 @@ class TelegramNotifier:
             mark = "✓ Отправлено" + (" (переписка уже была)" if "переписка" in (row.reason or "") else "")
             self._enqueue(lambda: self._edit(row.draft_msg_id, format_done(row, mark)))
 
-    async def _edit(self, message_id: int, text: str) -> None:
+    async def _edit(self, message_id: int, text: str, markup=None) -> None:
         chat = self.cfg.get("owner_chat_id", 0)
         if chat:
             await self._retry(lambda: self.bot.edit_message_text(
-                chat_id=chat, message_id=message_id, text=text[:MAX_LEN], reply_markup=None))
+                chat_id=chat, message_id=message_id, text=text[:MAX_LEN], reply_markup=markup))
 
     async def _delete(self, message_id: int) -> bool:
         chat = self.cfg.get("owner_chat_id", 0)
@@ -171,6 +173,15 @@ class TelegramNotifier:
             self._enqueue(lambda: self._edit(row.draft_msg_id, format_done(row, mark)))
         else:
             self._push(format_done(row, mark))
+
+    async def expire_draft(self, row: Row) -> None:
+        if not row.draft_msg_id:
+            return
+        kb = _kb([("Вернуть черновик", f"restore:{row.id}")])
+        self._enqueue(lambda: self._edit(row.draft_msg_id, format_done(row, "⌛ Черновик устарел"), kb))
+
+    async def draft_reminder(self, rows: list[Row], hours: int) -> None:
+        self._push(format_draft_reminder(rows, hours))
 
     async def remove_draft(self, row: Row) -> None:
         if not row.draft_msg_id:
@@ -276,6 +287,14 @@ class OwnerBot:
         if self._is_owner(update):
             await self._delete(self._cancel_input(update.effective_chat.id))
             await self._delete(update.effective_message)
+
+    async def cmd_rescan(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Как кнопка «↻ Пройти заново» в окне программы."""
+        if not self._is_owner(update):
+            return
+        ps = self.engine.rescan()
+        await self._say(update, f"Прохожу заново: {', '.join(ps)}. Черновики придут сюда, старые сообщения по этим "
+                                "объявлениям удалятся." if ps else "Нет работающих площадок: все выключены или на паузе.")
 
     async def cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._pause_resume(update, context, True)
@@ -473,6 +492,15 @@ class OwnerBot:
                 "seen": "Ждёт заполнения профиля", "failed": "Не удалось обработать"
                 }.get(status, f"Статус: {status}")
 
+    def _restore_outcome(self, id: int, status: str) -> str:
+        reason = self.store.get(id).reason
+        return {"load_failed": "✗ Объявление не загрузилось — возможно, его сняли с сайта",
+                "filtered": f"✗ Больше не подходит: {reason}",
+                "duplicate": f"✗ По этой квартире письмо уже есть ({reason})",
+                "ask_dup": "Похоже на знакомое объявление — см. вопрос ниже",
+                "seen": "Ждёт заполнения профиля (/profile)",
+                "failed": f"✗ Письмо не создано: {reason}"}.get(status, f"Статус: {status}")
+
     def _skip_outcome(self, id: int) -> str:
         status = self.store.get(id).status
         return "Пропущено" if status == "skipped" else f"Уже обработано (статус: {status})"
@@ -515,6 +543,12 @@ class OwnerBot:
         if kind == "skip":
             await e.skip(id)
             return self._skip_outcome(id)
+        if kind == "restore":
+            await self._collapse(update.callback_query.message, id, "↻ Возвращаю черновик…")
+            status = await e.restore(id)
+            if status == "draft":
+                return None   # новый черновик уже заменил это сообщение
+            return self._restore_outcome(id, status)
         if kind == "dup":
             if arg == "send":
                 await e.resolve_duplicate(id, True)
@@ -532,7 +566,8 @@ def build_application(cfg: dict, engine, store: Store) -> tuple[Application, Own
     req, upd_req = (HTTPXRequest(proxy=proxy), HTTPXRequest(proxy=proxy)) if proxy else (HTTPXRequest(), HTTPXRequest())
     app = Application.builder().token(cfg["bot_token"]).request(req).get_updates_request(upd_req).build()
     h = OwnerBot(cfg, engine, store)
-    for name in ("start", "help", "status", "cancel", "pause", "resume", "mode", "filters", "prompt", "profile"):
+    for name in ("start", "help", "status", "cancel", "pause", "resume", "mode", "filters", "prompt", "profile",
+                 "rescan"):
         app.add_handler(CommandHandler(name, getattr(h, f"cmd_{name}")))
     app.add_handler(CallbackQueryHandler(h.on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, h.on_text))

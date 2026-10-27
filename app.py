@@ -69,7 +69,8 @@ PLATFORM_NAMES = {k: n for k, n, _ in PLATFORM_ROWS}
 MAIL_HINT = ("Вход выполнен. Один раз включите в настройках аккаунта {name} e-mail-уведомления о новых "
              "сообщениях на адрес Gmail из этой программы — иначе ответы арендодателей не дойдут до бота.")
 STOP_WAIT = 40   # сколько ждём, пока циклы движка закончат текущую работу при остановке, сек
-KIND_TEXT = {"logged_out": "вход нужен", "captcha": "капча", "blocked": "блокировка", "broken": "сбой разметки",
+KIND_TEXT = {"logged_out": "вход нужен", "captcha": "капча", "blocked": "блокировка",
+             "broken": "страница не разобрана",
              "send": "сбой отправки", "ai": "сбой нейросети"}
 
 log = logging.getLogger("wohnung")
@@ -1071,6 +1072,8 @@ class App(ctk.CTk):
             return "не в этом запуске", "gray"
         if st["paused_all"] or key in st["paused"]:
             return "пауза", AMBER
+        if "slow" in kinds:   # не пауза: письма ждут, программа повторяет
+            return "сайт медленно отвечает", AMBER
         return "включена", GREEN
 
     def render_platforms(self, st: dict):
