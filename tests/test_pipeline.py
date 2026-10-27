@@ -1054,3 +1054,108 @@ async def test_daily_cap_logged_once_per_day(caplog):
         await env.engine.send_queued_once()
         env.clock.now += timedelta(seconds=10)
     assert sum("дневной лимит" in r.getMessage() for r in caplog.records) == 1
+
+
+# ---------- принудительный проход (кнопка «Пройти заново») ----------
+
+def rescan_env(mode="confirm", listings=None):
+    env = Env(mode)
+    env.ka.listings = listings if listings is not None else [L()]
+    return env
+
+
+async def test_rescan_redrafts_skipped_and_removes_old_message():
+    env = rescan_env()
+    await env.engine.poll_once("kleinanzeigen")
+    await env.engine.skip(1)
+    await env.engine.poll_once("kleinanzeigen")   # обычный опрос: пропущенное не трогаем
+    assert env.store.get(1).status == "skipped" and len(env.ai.calls) == 1
+    assert env.engine.rescan() == ["kleinanzeigen", "wggesucht"]
+    await env.engine.poll_once("kleinanzeigen")
+    row = env.store.get(1)
+    assert row.status == "draft" and len(env.ai.calls) == 2
+    assert env.notifier.names("remove_draft") == [("remove_draft", 1)]
+    assert row.draft_msg_id   # новое сообщение с кнопками
+    await env.engine.poll_once("kleinanzeigen")   # флаг одноразовый
+    assert len(env.ai.calls) == 2
+
+
+async def test_rescan_replaces_pending_draft():
+    env = rescan_env()
+    await env.engine.poll_once("kleinanzeigen")
+    old = env.store.get(1).draft_msg_id
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    row = env.store.get(1)
+    assert row.status == "draft" and row.draft_msg_id != old and len(env.notifier.names("draft")) == 2
+    assert env.notifier.names("remove_draft") == [("remove_draft", 1)]
+
+
+async def test_rescan_always_drafts_even_in_auto_mode():
+    env = rescan_env("auto")
+    await env.engine.poll_once("kleinanzeigen")
+    env.store.set_status(1, "skipped")
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "draft" and env.ka.sent == []
+
+
+async def test_rescan_new_listing_is_drafted_in_auto_mode():
+    env = rescan_env("auto")
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "draft"
+
+
+async def test_rescan_never_touches_sent_or_queued():
+    env = rescan_env(listings=[L(ext_id="s"), L(ext_id="q", street="Gasse 2", contact_name="K")])
+    sent_row(env, "s", "Musterstraße 12", T0 - timedelta(days=1))
+    q = env.store.add(L(ext_id="q", street="Gasse 2", contact_name="K"), 800)
+    env.store.set_status(q, "queued", letter="Text")
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "sent" and env.store.get(q).status == "queued"
+    assert env.ai.calls == [] and env.notifier.calls == []
+
+
+async def test_rescan_skips_flat_already_sent_on_other_platform():
+    env = rescan_env()
+    sent_row(env, "w1", "Musterstraße 12", T0 - timedelta(days=1), platform="wggesucht")
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(2).status == "duplicate"
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(2).status == "duplicate" and env.ai.calls == []
+
+
+async def test_rescan_applies_current_filters():
+    env = rescan_env(listings=[L(warm_rent=950)])
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "filtered"
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")   # фильтры прежние — снова отсеяно, без письма
+    assert env.store.get(1).status == "filtered" and env.ai.calls == []
+    env.cfg["filters"]["max_warm"] = 1000
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "draft"
+
+
+async def test_rescan_detail_failure_restores_status():
+    env = rescan_env()
+    await env.engine.poll_once("kleinanzeigen")
+    await env.engine.skip(1)
+
+    async def boom(page, l):
+        raise RuntimeError("сеть")
+    env.ka.fetch_detail = boom
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "skipped"
+
+
+async def test_rescan_skips_paused_and_inactive_platforms():
+    env = rescan_env()
+    env.cfg["platforms"]["wggesucht"]["enabled"] = False
+    env.engine.pause("kleinanzeigen")
+    assert env.engine.rescan() == []

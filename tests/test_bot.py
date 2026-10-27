@@ -27,7 +27,10 @@ class FakeBot:
         return SimpleNamespace(message_id=100 + len(self.sent))
 
     async def delete_message(self, **kw):
+        if getattr(self, "old", False):
+            raise BadRequest("Message can't be deleted for everyone")
         self.deleted.append(kw)
+        return True
 
     async def edit_message_text(self, **kw):
         self.edited = getattr(self, "edited", []) + [kw]
@@ -134,6 +137,19 @@ async def test_remove_draft_deletes_message(tmp_path):
     await n.drain()
     await n.stop()
     assert bot.deleted == [{"chat_id": OWNER, "message_id": 555}]
+
+
+async def test_remove_old_draft_strips_buttons_when_delete_refused(tmp_path):
+    store, id = make_store(tmp_path)
+    store.set_status(id, "draft", draft_msg_id=555)
+    bot = FakeBot()
+    bot.old = True   # старше 48 ч
+    n = notifier(bot)
+    await n.remove_draft(store.get(id))
+    await n.drain()
+    await n.stop()
+    assert bot.deleted == [] and bot.edited[0]["message_id"] == 555
+    assert bot.edited[0]["text"].startswith("— Неактуально") and bot.edited[0]["reply_markup"] is None
 
 
 # ---------- OwnerBot ----------

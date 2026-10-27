@@ -668,6 +668,9 @@ class App(ctk.CTk):
         self.run_btn = ctk.CTkButton(top, text="▶ Запустить", width=150, fg_color=GREEN, hover_color=GREEN_HOVER,
                                      command=self.toggle_run)
         self.run_btn.pack(side="right")
+        self.rescan_btn = ctk.CTkButton(top, text="↻ Пройти заново", width=150, fg_color=GRAY,
+                                        hover_color=GRAY_HOVER, command=self.on_rescan)
+        self.rescan_btn.pack(side="right", padx=(0, 8))
 
     def render_status(self):
         text, color = STATUS[self.status]
@@ -677,6 +680,7 @@ class App(ctk.CTk):
         self.run_btn.configure(text="▶ Запустить" if stopped else "■ Остановить",
                                fg_color=GREEN if stopped else RED, hover_color=GREEN_HOVER if stopped else "#b94440",
                                state="disabled" if self.busy else "normal")
+        self.rescan_btn.configure(state="disabled" if stopped or self.busy else "normal")
         self.update_tray()
 
     def set_status(self, status: str):
@@ -1022,6 +1026,8 @@ class App(ctk.CTk):
         ctk.CTkLabel(tab, anchor="w", justify="left", wraplength=900, text_color="gray", text=(
             "Переключатель у площадки — участвует ли она, когда нажимаете «▶ Запустить» сверху (во время работы "
             "действует сразу). «▶ Только эту» — запустить одну площадку; во время работы — добавить её к запуску. "
+            "«↻ Пройти заново» сверху — заново прислать черновики по всем подходящим объявлениям, по которым письмо "
+            "ещё не ушло (и пропущенным тоже); прежние сообщения о них в Telegram удаляются. "
             "Всем остальным (черновики, фильтры, профиль, режим «авто / подтверждать») управляет Telegram-бот. "
             "Immowelt появится в следующих версиях.")).pack(fill="x", padx=18, pady=(4, 0))
 
@@ -1135,6 +1141,25 @@ class App(ctk.CTk):
             self.loop.call_soon_threadsafe(self.engine.activate, key)
             log.info("%s: добавлена к запуску", PLATFORM_NAMES[key])
             self.after(200, lambda: self.refresh_status(once=True))
+
+    def on_rescan(self):
+        """Принудительный проход: все подходящие объявления выдачи, по которым письмо не ушло, — снова черновиком."""
+        e = self.engine
+        if not e or self.busy:
+            return
+
+        def done(ps, err):
+            if err:
+                log.warning("Пройти заново: %r", err)
+                return
+            if not ps:
+                self.say("warning", "Пройти заново", "Нет работающих площадок: все выключены или на паузе.")
+                return
+            names = ", ".join(PLATFORM_NAMES[p] for p in ps)
+            log.info("Принудительный проход: %s", names)
+            self.say("info", "Пройти заново", f"Прохожу {names}. Новые черновики придут в Telegram, "
+                                              "старые сообщения по этим объявлениям удалятся.")
+        self.submit(self.call_in_loop(e.rescan), done)
 
     def on_pause(self, key: str):
         e = self.engine

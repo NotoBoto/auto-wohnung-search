@@ -117,7 +117,7 @@ class TelegramNotifier:
 
     async def draft(self, row: Row, text: str, warm_estimated: bool) -> int:
         if row.draft_msg_id:   # новый вариант заменяет старый черновик, а не копится в чате
-            await self._delete(row.draft_msg_id)
+            await self._drop(row)
         kb = _kb([("Отправить", f"send:{row.id}"), ("Изменить", f"edit:{row.id}")],
                  [("Другой вариант", f"regen:{row.id}"), ("Пропустить", f"skip:{row.id}")])
         return await self._send(format_draft(row, text, warm_estimated), kb)
@@ -142,10 +142,16 @@ class TelegramNotifier:
             await self._retry(lambda: self.bot.edit_message_text(
                 chat_id=chat, message_id=message_id, text=text[:MAX_LEN], reply_markup=None))
 
-    async def _delete(self, message_id: int) -> None:
+    async def _delete(self, message_id: int) -> bool:
         chat = self.cfg.get("owner_chat_id", 0)
-        if chat:
-            await self._retry(lambda: self.bot.delete_message(chat_id=chat, message_id=message_id))
+        if not chat:
+            return False
+        return bool(await self._retry(lambda: self.bot.delete_message(chat_id=chat, message_id=message_id)))
+
+    async def _drop(self, row: Row) -> None:
+        """Убрать черновик из чата. Сообщения старше 48 ч Telegram удалить не даёт — тогда снимаем кнопки."""
+        if not await self._delete(row.draft_msg_id):
+            await self._edit(row.draft_msg_id, format_done(row, "— Неактуально"))
 
     async def reply(self, row: Row | None, r) -> None:
         self._push(format_reply(row, r))
@@ -169,7 +175,7 @@ class TelegramNotifier:
     async def remove_draft(self, row: Row) -> None:
         if not row.draft_msg_id:
             return
-        self._enqueue(lambda: self._delete(row.draft_msg_id))
+        self._enqueue(lambda: self._drop(row))
 
 
 class OwnerBot:

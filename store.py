@@ -138,6 +138,10 @@ class Store:
         return self._db.execute("SELECT 1 FROM listings WHERE platform=? AND ext_id=?",
                                 (platform, ext_id)).fetchone() is not None
 
+    def status_of(self, platform: str, ext_id: str) -> str | None:
+        r = self._db.execute("SELECT status FROM listings WHERE platform=? AND ext_id=?", (platform, ext_id)).fetchone()
+        return r["status"] if r else None
+
     def get(self, id: int) -> Row:
         r = self._db.execute("SELECT * FROM listings WHERE id=?", (id,)).fetchone()
         if r is None:

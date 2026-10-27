@@ -35,6 +35,8 @@ NO_PROFILE = "профиль не заполнен"   # reason у строки s
 RECHECK_WINDOW = timedelta(hours=24)  # такие seen обрабатываем, когда профиль заполнен; столько же живёт повтор failed
 GONE = "объявление снято с сайта"   # reason у failed: отправлять было уже некуда
 LOAD_FAILED = "объявление не загрузилось"   # начало reason у failed без сбоя письма — такие не повторяем
+# «Пройти заново»: письмо по объявлению не ушло и не стоит в очереди — объявление проходит конвейер ещё раз
+REDO_STATUSES = ("seen", "filtered", "duplicate", "ask_dup", "draft", "skipped", "failed")
 BLOCKING_KINDS = ("captcha", "logged_out", "blocked", "broken")   # эти случаи держат площадку на паузе
 SNAPSHOTS_KEEP = 40   # сколько файлов снимков страниц (png + html) хранить в debug_dir
 
@@ -91,6 +93,7 @@ class Engine:
         self._login_prev: dict[str, bool] = {}   # была ли площадка на паузе до входа владельца
         self._paced: dict[str, bool] = {}   # идёт опрос площадки: грузили ли уже объявление (пауза перед следующим)
         self._recheck_lock = asyncio.Lock()   # profile_updated: один проход за раз
+        self._rescan: set[str] = set()   # площадки, у которых следующий опрос — принудительный проход
         self._cap_logged: dict[str, str] = {}   # площадка → день, когда записали «дневной лимит исчерпан»
         self._stop = asyncio.Event()
 
@@ -118,6 +121,15 @@ class Engine:
         ev = self._wake.get(platform)
         if ev:
             ev.set()
+
+    def rescan(self) -> list[str]:
+        """Кнопка «Пройти заново»: следующий опрос каждой работающей площадки (сейчас же) заново пишет черновики
+        по всем подходящим объявлениям выдачи, по которым письмо не ушло. Возвращает эти площадки."""
+        ps = [p for p in self.sources if self.active(p) and not self._paused_now(p)]
+        self._rescan.update(ps)
+        for p in ps:
+            self.wake(p)
+        return ps
 
     def _paused_now(self, platform: str) -> bool:
         return self._paused_all or platform in self._paused
@@ -230,22 +242,30 @@ class Engine:
         self.store.set_status(id, "duplicate", reason=f"как #{match_id}")
         return "duplicate"
 
-    async def process(self, platform: str, l: Listing) -> str:
+    async def _pace(self, platform: str) -> None:
+        """Между загрузками объявлений в одном опросе — пауза как у человека."""
+        if self._paced.get(platform):
+            await human_pause(3, 8)
+        if platform in self._paced:
+            self._paced[platform] = True
+
+    async def process(self, platform: str, l: Listing, force: bool = False) -> str:
+        """force — принудительный проход: знакомое объявление без отправленного письма обрабатывается заново,
+        письмо всегда идёт черновиком."""
         days = self.cfg["dedup_days"]
         # 1. до загрузки подробностей: уже знакомое объявление или явный дубль
         d = self.store.find_dedup(l, estimate_warm(l)[0], days)
         if d.kind == "exact":
             known = self._known(l, d.match_id)
+            if known and force and known.status in REDO_STATUSES:
+                return await self._redo(platform, known, l)
             return known.status if known else self._mark_duplicate(l, estimate_warm(l)[0], d.match_id)
         # 2. отсев по данным выдачи — объявление не открываем (строка filtered не блокирует дубли)
         if reason := prefilter(l, self.cfg["filters"]):
             self.store.set_status(self.store.add(l, estimate_warm(l)[0]), "filtered", reason=reason)
             return "filtered"
         # 3. подробности (BlockedError/SourceBroken/Paused уходят в poll_once); между объявлениями — пауза как у человека
-        if self._paced.get(platform):
-            await human_pause(3, 8)
-        if platform in self._paced:
-            self._paced[platform] = True
+        await self._pace(platform)
         l = await self._detail(platform, l, check_pause=True)
         warm, est = estimate_warm(l)
         # 4. от этой проверки до резерва — ни одного await
@@ -261,9 +281,26 @@ class Engine:
             self.store.set_status(id, "ask_dup", reason=f"похоже на #{d.match_id}")
             await self._safe(self.notifier.ask_duplicate(self.store.get(id), self.store.get(d.match_id)))
             return "ask_dup"
-        return await self._continue(id, l)
+        return await self._continue(id, l, force_draft=force)
 
-    async def _continue(self, id: int, l: Listing) -> str:
+    async def _redo(self, platform: str, row: Row, l: Listing) -> str:
+        """Принудительный проход по знакомому объявлению: прежнее сообщение в Telegram удаляется,
+        дальше — как у строки, ждавшей профиля (_recheck): дубли, фильтры, лимит контакта, черновик."""
+        if prefilter(l, self.cfg["filters"]) and row.status == "filtered":
+            return "filtered"   # по выдаче видно, что не подходит, — объявление не открываем
+        await self._pace(platform)
+        l = await self._detail(platform, l, check_pause=True)   # сбой — строка остаётся как была
+        row = self.store.get(row.id)   # пока грузили, владелец мог нажать кнопку на старом черновике
+        if row.status not in REDO_STATUSES:
+            return row.status
+        if row.draft_msg_id:
+            await self._safe(self.notifier.remove_draft(row))
+        self.store.set_status(row.id, "seen", reason="", draft_msg_id=None)
+        self._draft_at.pop(row.id, None)
+        self._listings[row.id] = l
+        return await self._recheck(row.id, l, force_draft=True)
+
+    async def _continue(self, id: int, l: Listing, force_draft: bool = False) -> str:
         """Шаги 4–8. До резерва (queued/generating) нет await."""
         profile = self.cfg["profile"]
         r = check(l, self.cfg["filters"], profile)
@@ -283,7 +320,7 @@ class Engine:
             self.store.set_status(id, "filtered", reason="лимит контакта")
             return "filtered"
         self.store.set_status(id, "queued", reason=GENERATING)   # резерв: блокирует дубль на другой площадке
-        return await self._write_letter(id, l, r.warm_estimated)
+        return await self._write_letter(id, l, r.warm_estimated, force_draft=force_draft)
 
     async def _write_letter(self, id: int, l: Listing, warm_estimated: bool, wish: str = "",
                             force_draft: bool = False) -> str:
@@ -503,6 +540,8 @@ class Engine:
                 if self._paused_now(platform):   # пауза пришла, пока ждали блокировку
                     return
                 listings = await src.search(await self.browser.page(platform))
+                force = platform in self._rescan   # флаг снимаем, только когда выдача получена
+                self._rescan.discard(platform)
         except BlockedError as e:
             await self._block(platform, e.kind, str(e))
             return
@@ -516,7 +555,9 @@ class Engine:
         self._paced[platform] = False
         counts: Counter = Counter()
         try:
-            await self._process_all(platform, listings, counts)
+            if force:
+                log.info("%s: принудительный проход по %d объявлениям выдачи", platform, len(listings))
+            await self._process_all(platform, listings, counts, force)
         finally:
             self._paced.pop(platform, None)
             # «известные» — были в базе до опроса; остальные — чем закончилась обработка (filtered, draft, …)
@@ -524,16 +565,18 @@ class Engine:
             log.info("%s: опрос за %.0f с — в выдаче %d%s", platform, time.monotonic() - t0, len(listings),
                      f": {done}" if done else "")
 
-    async def _process_all(self, platform: str, listings: list[Listing], counts: Counter | None = None) -> None:
+    async def _process_all(self, platform: str, listings: list[Listing], counts: Counter | None = None,
+                           force: bool = False) -> None:
         counts = Counter() if counts is None else counts
         for i, l in enumerate(listings):
             if self._paused_now(platform) or not self.active(platform):   # площадку выключили во время опроса
                 counts["пропущены (пауза)"] += len(listings) - i
                 break
-            known = self.store.has(l.platform, l.ext_id)
+            before = self.store.status_of(l.platform, l.ext_id)
+            redo = force and before in REDO_STATUSES
             try:
-                status = await self.process(platform, l)
-                counts["известные" if known else status] += 1
+                status = await self.process(platform, l, force)
+                counts[f"заново: {status}" if redo else "известные" if before else status] += 1
             except Paused:
                 counts["пропущены (пауза)"] += len(listings) - i
                 break
@@ -645,7 +688,7 @@ class Engine:
             self._listings[row.id] = l
             await self._recheck(row.id, l)
 
-    async def _recheck(self, id: int, l: Listing, expect: str = "seen") -> str:
+    async def _recheck(self, id: int, l: Listing, expect: str = "seen", force_draft: bool = False) -> str:
         """Дедупликация уже записанной строки и резерв — как шаг 3 в process(), без await до резерва."""
         row = self.store.get(id)
         if row.status != expect:   # строку уже обработал другой вызов — не трогаем
@@ -667,7 +710,7 @@ class Engine:
             self.store.set_status(id, "ask_dup", reason=f"похоже на #{d.match_id}")
             await self._safe(self.notifier.ask_duplicate(self.store.get(id), self.store.get(d.match_id)))
             return "ask_dup"
-        return await self._continue(id, l)
+        return await self._continue(id, l, force_draft)
 
     def _filtered(self, id: int, l: Listing) -> bool:
         r = check(l, self.cfg["filters"], self.cfg["profile"])
