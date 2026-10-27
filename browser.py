@@ -157,6 +157,15 @@ class Browser:
             await page.goto(url, wait_until="domcontentloaded")   # «load» страниц с рекламой — дольше таймаута
             await page.bring_to_front()
 
+    async def show(self, platform: str) -> None:
+        """Окно площадки — на экран и в панель задач (например, чтобы владелец прошёл капчу)."""
+        self._shown.add(platform)
+        await self._taskbar(platform, True)
+        await self._move(platform, ONSCREEN)
+        ctx = self._ctx.get(platform)
+        if ctx is not None and ctx.pages:
+            await ctx.pages[0].bring_to_front()
+
     async def hide(self, platform: str) -> None:
         self._shown.discard(platform)
         await self._move(platform, OFFSCREEN)

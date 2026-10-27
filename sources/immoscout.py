@@ -13,6 +13,7 @@ from sources.base import BlockedError, MissingFieldError, NotSubmittedError, Sou
 log = logging.getLogger(__name__)
 
 BASE = "https://www.immobilienscout24.de"
+LOAD_WAIT_MS = 10000   # сколько ждать «load» после разметки; дольше — страница держится на рекламе
 _BLOCK_RE = re.compile(r"<title>Ich bin kein Roboter|<awswaf-captcha|id=\"captcha-container\"", re.I)
 _MODEL_KEY = "resultListModel:"
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -172,10 +173,18 @@ class ImmoScout(Source):
             return "logged_out"
         return "captcha" if _BLOCK_RE.search(html) else None
 
-    async def _open(self, page, url: str) -> str:
-        await page.goto(url)
-        await page.wait_for_load_state("load")
+    @staticmethod
+    async def _goto(page, url: str) -> None:
+        # «load» ждёт рекламу и бывает дольше 30 с (вживую на объявлении 2026-10-27): ждём разметку, «load» — недолго
+        await page.goto(url, wait_until="domcontentloaded")
+        try:
+            await page.wait_for_load_state("load", timeout=LOAD_WAIT_MS)
+        except Exception:
+            pass
         await accept_consent(page)
+
+    async def _open(self, page, url: str) -> str:
+        await self._goto(page, url)
         html = await page.content()
         if kind := self.detect_block(html, page.url):
             raise BlockedError(kind)
@@ -188,17 +197,21 @@ class ImmoScout(Source):
         return self.parse_detail(await self._open(page, l.url), l)
 
     async def is_logged_in(self, page) -> bool:
-        """В странице выдачи есть "loggedIn":true (проверено вживую на аккаунте с входом)."""
-        if not page.url.startswith(BASE):
-            await page.goto(self.search_url({}))
-            await page.wait_for_load_state("load")
-            await accept_consent(page)
-        html = await page.content()
-        if kind := self.detect_block(html, page.url):
-            if kind != "logged_out":
-                raise BlockedError(kind)
-            return False
-        return bool(re.search(r'"loggedIn":\s*true|userLoggedIn:\s*true', html))
+        """В странице выдачи есть "loggedIn":true (проверено вживую на аккаунте с входом). На других страницах
+        признака нет (вживую 2026-10-26: после входа окно на «Mein Konto») — тогда проверяем на выдаче."""
+        for attempt in range(2):
+            if attempt or not page.url.startswith(BASE):
+                await self._goto(page, self.search_url({}))
+            html = await page.content()
+            if kind := self.detect_block(html, page.url):
+                if kind != "logged_out":
+                    raise BlockedError(kind)
+                return False
+            if re.search(r'"loggedIn":\s*true|userLoggedIn:\s*true', html):
+                return True
+            if re.search(r'"loggedIn":\s*false|userLoggedIn:\s*false', html):
+                return False
+        return False
 
     async def send(self, page, l: Listing, text: str, profile: dict) -> None:
         try:

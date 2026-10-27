@@ -113,3 +113,20 @@ async def test_show_login_does_not_wait_for_full_load(monkeypatch, tmp_path):
     pg.goto, pg.bring_to_front = goto, front
     await b.show_login("kleinanzeigen", "https://x")
     assert seen.get("wait_until") == "domcontentloaded"   # «load» главной с рекламой — дольше 30 с
+
+
+async def test_show_moves_window_onscreen_and_to_taskbar(monkeypatch, tmp_path):
+    patch(monkeypatch)
+    b = B.Browser(tmp_path)
+    moves, bars = [], []
+    async def move(platform, pos): moves.append(pos)
+    async def taskbar(platform, visible): bars.append(visible)
+    b._move, b._taskbar = move, taskbar
+    pg = await b.page("immoscout")
+    fronted = []
+    async def front(): fronted.append(True)
+    pg.bring_to_front = front
+    await b.show("immoscout")
+    # окно было за экраном (капча на проверке входа) — должно оказаться перед владельцем
+    assert moves[-1] == B.ONSCREEN and bars[-1] is True and fronted and "immoscout" in b._shown
+    await b.close()

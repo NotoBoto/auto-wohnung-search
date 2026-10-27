@@ -28,8 +28,22 @@ class FakeLocator:
     async def count(self) -> int:
         return int(self._has())
 
+    async def focus(self):
+        if not self._has():
+            raise TimeoutError(f"нет элемента {self.sel}")
+
     async def is_visible(self, timeout=None) -> bool:
         return self._has()
+
+    # вложенные поиски: ключ — «родитель >> что ищем», его и перечисляют в present
+    def locator(self, sel: str) -> "FakeLocator":
+        return FakeLocator(self.page, f"{self.sel} >> {sel}")
+
+    def get_by_label(self, text: str, exact: bool = False) -> "FakeLocator":
+        return FakeLocator(self.page, f"{self.sel} >> label={text}")
+
+    def get_by_role(self, role: str, name=None, exact: bool = False) -> "FakeLocator":
+        return FakeLocator(self.page, f"{self.sel} >> {_role(role, name)}")
 
     async def input_value(self) -> str:
         return ""
@@ -81,6 +95,9 @@ class FakePage:
     def locator(self, sel: str) -> FakeLocator:
         return FakeLocator(self, sel)
 
+    def get_by_role(self, role: str, name=None, exact: bool = False) -> FakeLocator:
+        return FakeLocator(self, _role(role, name))
+
     def get_by_text(self, pattern) -> FakeLocator:
         return FakeLocator(self, "__confirm__")
 
@@ -95,6 +112,10 @@ class FakePage:
 
 async def no_wait(*a, **kw):
     pass
+
+
+def _role(role: str, name) -> str:
+    return f"role={role}[{getattr(name, 'pattern', name) or ''}]"
 
 
 async def fast_type(locator, text: str):
