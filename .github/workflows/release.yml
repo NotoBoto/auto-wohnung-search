@@ -1,4 +1,4 @@
-# Релиз: git tag v0.2.0 && git push origin v0.2.0
+# Релиз: git tag v0.2.1 && git push origin v0.2.1
 # Собирает установщик на Windows и публикует его в GitHub Releases —
 # оттуда его скачивают люди и берёт автообновление программы.
 name: Release
