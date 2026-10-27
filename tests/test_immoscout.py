@@ -217,6 +217,19 @@ async def test_send_fills_form_and_submits():
     assert page.submitted
 
 
+class SlowAdsPage(FakePage):
+    """Реклама держит событие «load» дольше таймаута (вживую на объявлении 2026-10-27)."""
+    async def wait_for_load_state(self, state=None, **kw):
+        if state == "load":
+            raise TimeoutError("Timeout 30000ms exceeded")
+
+
+async def test_send_does_not_wait_for_ads_load():
+    page = SlowAdsPage(FORM_PRESENT, html=EXPOSE)
+    await ImmoScout().send(page, LISTING, "Hallo", PROFILE)
+    assert page.wait_until == "domcontentloaded" and page.submitted
+
+
 async def test_send_without_address_is_missing_field_before_submit():
     page = FakePage(FORM_PRESENT, html=EXPOSE)
     with pytest.raises(MissingFieldError) as e:
