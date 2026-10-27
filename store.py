@@ -138,6 +138,10 @@ class Store:
         return self._db.execute("SELECT 1 FROM listings WHERE platform=? AND ext_id=?",
                                 (platform, ext_id)).fetchone() is not None
 
+    def status_of(self, platform: str, ext_id: str) -> str | None:
+        r = self._db.execute("SELECT status FROM listings WHERE platform=? AND ext_id=?", (platform, ext_id)).fetchone()
+        return r["status"] if r else None
+
     def get(self, id: int) -> Row:
         r = self._db.execute("SELECT * FROM listings WHERE id=?", (id,)).fetchone()
         if r is None:
@@ -262,6 +266,10 @@ class Store:
         def count(table: str, col: str, extra: str = "") -> int:
             return db.execute(f"SELECT COUNT(*) FROM {table} WHERE {col}>=? AND {col}<? {extra}", (lo, hi)).fetchone()[0]
 
+        def events(name: str) -> int:
+            return db.execute("SELECT COUNT(*) FROM meta WHERE key LIKE ? AND value>=? AND value<?",
+                              (f"{name}_at:%", lo, hi)).fetchone()[0]
+
         filtered = {r["reason"]: r["n"] for r in db.execute(
             "SELECT reason, COUNT(*) n FROM listings WHERE status='filtered' AND created_at>=? AND created_at<?"
             " GROUP BY reason", (lo, hi))}
@@ -270,6 +278,7 @@ class Store:
                 "filtered": filtered,
                 "duplicates": count("listings", "created_at", "AND status='duplicate'"),
                 "replies": count("replies", "received_at"),
+                "expired": events("expired"), "skipped": events("skipped"),
                 "failed": count("listings", "created_at", "AND status='failed'")}
 
     def open_incident(self, platform: str, kind: str) -> bool:
@@ -289,6 +298,10 @@ class Store:
         if kind is not None:
             sql, args = sql + " AND kind=?", (*args, kind)
         self._write(sql, args)
+
+    def note(self, event: str, id: int) -> None:
+        """Отметка времени события строки (expired, skipped) — для сводки: у статуса своего времени нет."""
+        self.set_meta(f"{event}_at:{id}", _ts(self._clock()))
 
     def get_meta(self, key: str) -> str | None:
         r = self._db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()

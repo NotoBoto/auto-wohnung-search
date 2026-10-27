@@ -4,7 +4,7 @@ import re
 
 from browser import human_pause, human_type
 from models import Listing, parse_address, parse_area, parse_money, parse_rooms
-from sources.base import BlockedError, ListingGoneError, MissingFieldError, NotSubmittedError, Source, SourceBroken, listing_flags
+from sources.base import BlockedError, ListingGoneError, MissingFieldError, NotSubmittedError, Source, SourceBroken, listing_flags, open_page
 
 log = logging.getLogger(__name__)
 
@@ -25,7 +25,6 @@ _LOGIN_BUTTON = "[data-testid='login-button']"   # «Einloggen» в шапке �
 # ищем по подписи; «Anrede» и «Schufa Nachweis» — обязательные списки (combobox → option)
 _DIALOG = "dialog[open]"
 _ANREDE = {"Herr": "Herr", "Frau": "Frau"}   # иначе — «Keine Angabe»
-LOAD_WAIT_MS = 10000   # сколько ждать «load» после разметки; дольше — страница держится на рекламе
 
 
 def _text(s: str) -> str:
@@ -152,12 +151,7 @@ class Kleinanzeigen(Source):
         return None
 
     async def _open(self, page, url: str) -> str:
-        # «load» ждёт рекламу и бывает дольше 30 с (вживую на объявлении 2026-10-26): ждём разметку, «load» — недолго
-        await page.goto(url, wait_until="domcontentloaded")
-        try:
-            await page.wait_for_load_state("load", timeout=LOAD_WAIT_MS)
-        except Exception:
-            pass
+        await open_page(page, url)
         await accept_consent(page)
         html = await page.content()
         if kind := self.detect_block(html, page.url):
@@ -166,6 +160,16 @@ class Kleinanzeigen(Source):
 
     async def search(self, page) -> list[Listing]:
         return self.parse_search(await self._open(page, self.search_url(self.filters)))
+
+    def page_url(self, filters: dict, n: int) -> str:
+        """Страница n выдачи — в том виде, в каком сайт сам строит ссылку «Seite n» (взято из выдачи 2026-10)."""
+        price = f"preis::{int(filters['max_warm'])}/" if filters.get("max_warm") else ""
+        return f"{BASE}/s-wohnung-mieten/bonn/sortierung:neuste/{price}seite:{n}/{BONN_LOC}"
+
+    async def search_more(self, page, n: int) -> list[Listing]:
+        """Страница n ≥ 2. Фильтр сайта «Kein Tausch» не используем: у большинства объявлений поле не заполнено,
+        и фильтр их прячет (в выдаче 2026-10: 60 «Kein Tausch» + 7 «Nur Tausch» из 175)."""
+        return self.parse_search(await self._open(page, self.page_url(self.filters, n)))
 
     async def fetch_detail(self, page, l: Listing) -> Listing:
         return self.parse_detail(await self._open(page, l.url), l)

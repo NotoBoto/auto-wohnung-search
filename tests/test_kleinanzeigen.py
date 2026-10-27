@@ -93,6 +93,12 @@ def test_detect_block_ip_range_ban():
     assert Kleinanzeigen.detect_block(page, "https://www.kleinanzeigen.de/s-x") == "blocked"
 
 
+def test_page_url_like_site_link():
+    u = Kleinanzeigen().page_url({"max_warm": 900}, 2)
+    assert u == "https://www.kleinanzeigen.de/s-wohnung-mieten/bonn/sortierung:neuste/preis::900/seite:2/c203l1038"
+    assert "swap" not in u
+
+
 def test_search_url():
     u = Kleinanzeigen().search_url({"max_warm": 900, "min_rooms": 2})
     assert u.startswith("https://www.kleinanzeigen.de/s-wohnung-mieten/bonn/") and "preis::900" in u and "c203l1038" in u

@@ -110,6 +110,12 @@ class FakeNotifier:
     async def remove_draft(self, row):
         self.calls.append(("remove_draft", row.id))
 
+    async def expire_draft(self, row):
+        self.calls.append(("expire_draft", row.id))
+
+    async def draft_reminder(self, rows, hours):
+        self.calls.append(("draft_reminder", [r.id for r in rows], hours))
+
     async def gone(self, row):
         self.calls.append(("gone", row.id))
 
@@ -819,15 +825,75 @@ async def test_failed_retry_does_not_write_second_letter_for_same_flat():
     assert env.store.get(1).status == "duplicate" and len(env.notifier.names("draft")) == 1
 
 
-async def test_draft_expires_after_12h(eng):
+async def test_draft_reminded_once_then_expires_after_24h(eng):
     await eng.engine.process("kleinanzeigen", L())
-    eng.clock.now = T0 + timedelta(hours=11, minutes=59)
+    eng.clock.now = T0 + timedelta(hours=21, minutes=59)
     await eng.engine.maintenance_once()
-    assert eng.store.get(1).status == "draft" and not eng.notifier.names("remove_draft")
-    eng.clock.now = T0 + timedelta(hours=12)
+    assert not eng.notifier.names("draft_reminder")
+    eng.clock.now = T0 + timedelta(hours=22)
     await eng.engine.maintenance_once()
     await eng.engine.maintenance_once()
-    assert eng.store.get(1).status == "skipped" and eng.notifier.names("remove_draft") == [("remove_draft", 1)]
+    assert eng.notifier.names("draft_reminder") == [("draft_reminder", [1], 2)]
+    eng.clock.now = T0 + timedelta(hours=23, minutes=59)
+    await eng.engine.maintenance_once()
+    assert eng.store.get(1).status == "draft" and not eng.notifier.names("expire_draft")
+    eng.clock.now = T0 + timedelta(hours=24)
+    await eng.engine.maintenance_once()
+    await eng.engine.maintenance_once()
+    row = eng.store.get(1)
+    assert row.status == "skipped" and row.reason == "черновик устарел"
+    assert eng.notifier.names("expire_draft") == [("expire_draft", 1)] and not eng.notifier.names("remove_draft")
+
+
+async def test_draft_age_survives_restart():
+    env = Env()
+    await env.engine.process("kleinanzeigen", L())
+    env.clock.now = T0 + timedelta(hours=20)
+    await env.engine.regenerate(1)   # новый вариант — срок с начала
+    again = Engine(env.cfg, env.store, env.ai, {"kleinanzeigen": env.ka}, env.browser, env.notifier, clock=env.clock)
+    env.clock.now = T0 + timedelta(hours=30)
+    await again.maintenance_once()
+    assert env.store.get(1).status == "draft"
+
+
+async def test_restore_expired_draft():
+    env = Env()
+    await env.engine.process("kleinanzeigen", L())
+    env.clock.now = T0 + timedelta(hours=24)
+    await env.engine.maintenance_once()
+    assert await env.engine.restore(1) == "draft"
+    row = env.store.get(1)
+    assert row.status == "draft" and len(env.ai.calls) == 2 and len(env.notifier.names("draft")) == 2
+    env.clock.now = T0 + timedelta(hours=47)
+    await env.engine.maintenance_once()   # новый срок — от возврата
+    assert env.store.get(1).status == "draft"
+    assert env.notifier.names("draft_reminder") == [("draft_reminder", [1], 2)]   # напоминание и для нового черновика
+
+
+async def test_restore_checks_filters_and_sent_flat():
+    env = Env(mode="auto")
+    await env.engine.process("kleinanzeigen", L())
+    env.store.set_status(1, "skipped", reason="черновик устарел")
+    sent_row(env, "w1", "Musterstraße 12", T0, platform="wggesucht")
+    assert await env.engine.restore(1) == "duplicate" and env.ka.sent == []
+
+
+async def test_restore_load_failure_keeps_row():
+    env = Env()
+    await env.engine.process("kleinanzeigen", L())
+    env.store.set_status(1, "skipped", reason="черновик устарел")
+    env.engine._listings.clear()
+
+    async def boom(page, l):
+        raise RuntimeError("404")
+    env.ka.fetch_detail = boom
+    assert await env.engine.restore(1) == "load_failed"
+    assert env.store.get(1).status == "skipped"
+
+
+async def test_restore_only_skipped(eng):
+    await eng.engine.process("kleinanzeigen", L())
+    assert await eng.engine.restore(1) == "draft" and len(eng.ai.calls) == 1   # черновик и так есть — не трогаем
 
 
 async def test_digest_once_at_20(eng):
@@ -1054,3 +1120,241 @@ async def test_daily_cap_logged_once_per_day(caplog):
         await env.engine.send_queued_once()
         env.clock.now += timedelta(seconds=10)
     assert sum("дневной лимит" in r.getMessage() for r in caplog.records) == 1
+
+
+# ---------- принудительный проход (кнопка «Пройти заново») ----------
+
+def rescan_env(mode="confirm", listings=None):
+    env = Env(mode)
+    env.ka.listings = listings if listings is not None else [L()]
+    return env
+
+
+async def test_rescan_redrafts_skipped_and_removes_old_message():
+    env = rescan_env()
+    await env.engine.poll_once("kleinanzeigen")
+    await env.engine.skip(1)
+    await env.engine.poll_once("kleinanzeigen")   # обычный опрос: пропущенное не трогаем
+    assert env.store.get(1).status == "skipped" and len(env.ai.calls) == 1
+    assert env.engine.rescan() == ["kleinanzeigen", "wggesucht"]
+    await env.engine.poll_once("kleinanzeigen")
+    row = env.store.get(1)
+    assert row.status == "draft" and len(env.ai.calls) == 2
+    assert env.notifier.names("remove_draft") == [("remove_draft", 1)]
+    assert row.draft_msg_id   # новое сообщение с кнопками
+    await env.engine.poll_once("kleinanzeigen")   # флаг одноразовый
+    assert len(env.ai.calls) == 2
+
+
+async def test_rescan_replaces_pending_draft():
+    env = rescan_env()
+    await env.engine.poll_once("kleinanzeigen")
+    old = env.store.get(1).draft_msg_id
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    row = env.store.get(1)
+    assert row.status == "draft" and row.draft_msg_id != old and len(env.notifier.names("draft")) == 2
+    assert env.notifier.names("remove_draft") == [("remove_draft", 1)]
+
+
+async def test_rescan_always_drafts_even_in_auto_mode():
+    env = rescan_env("auto")
+    await env.engine.poll_once("kleinanzeigen")
+    env.store.set_status(1, "skipped")
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "draft" and env.ka.sent == []
+
+
+async def test_rescan_new_listing_is_drafted_in_auto_mode():
+    env = rescan_env("auto")
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "draft"
+
+
+async def test_rescan_never_touches_sent_or_queued():
+    env = rescan_env(listings=[L(ext_id="s"), L(ext_id="q", street="Gasse 2", contact_name="K")])
+    sent_row(env, "s", "Musterstraße 12", T0 - timedelta(days=1))
+    q = env.store.add(L(ext_id="q", street="Gasse 2", contact_name="K"), 800)
+    env.store.set_status(q, "queued", letter="Text")
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "sent" and env.store.get(q).status == "queued"
+    assert env.ai.calls == [] and env.notifier.calls == []
+
+
+async def test_rescan_skips_flat_already_sent_on_other_platform():
+    env = rescan_env()
+    sent_row(env, "w1", "Musterstraße 12", T0 - timedelta(days=1), platform="wggesucht")
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(2).status == "duplicate"
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(2).status == "duplicate" and env.ai.calls == []
+
+
+async def test_rescan_applies_current_filters():
+    env = rescan_env(listings=[L(warm_rent=950)])
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "filtered"
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")   # фильтры прежние — снова отсеяно, без письма
+    assert env.store.get(1).status == "filtered" and env.ai.calls == []
+    env.cfg["filters"]["max_warm"] = 1000
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "draft"
+
+
+async def test_rescan_detail_failure_restores_status():
+    env = rescan_env()
+    await env.engine.poll_once("kleinanzeigen")
+    await env.engine.skip(1)
+
+    async def boom(page, l):
+        raise RuntimeError("сеть")
+    env.ka.fetch_detail = boom
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.store.get(1).status == "skipped"
+
+
+async def test_rescan_skips_paused_and_inactive_platforms():
+    env = rescan_env()
+    env.cfg["platforms"]["wggesucht"]["enabled"] = False
+    env.engine.pause("kleinanzeigen")
+    assert env.engine.rescan() == []
+
+
+# ---------- медленная страница при отправке ----------
+
+def timeout_error():
+    try:
+        try:
+            raise TimeoutError("Page.goto: Timeout 30000ms exceeded.")
+        except TimeoutError as e:
+            raise NotSubmittedError(f"kleinanzeigen: форма не заполнена: {e}") from e
+    except NotSubmittedError as e:
+        return e
+
+
+async def test_send_timeout_retries_later_without_pause():
+    env = Env(mode="auto")
+    five_queued(env)
+    calls, fail = [], [3]
+
+    async def send(page, l, text, profile):
+        calls.append(l.ext_id)
+        if fail[0]:
+            fail[0] -= 1
+            raise timeout_error()
+    env.ka.send = send
+    await env.engine.send_queued_once()
+    assert calls == ["0"] and env.store.get(1).status == "queued"
+    assert env.engine.status()["paused"] == [] and env.notifier.calls == []
+    env.clock.now += timedelta(minutes=4)
+    await env.engine.send_queued_once()   # повтор не раньше чем через 5 мин
+    assert calls == ["0"]
+    for _ in range(2):
+        env.clock.now += timedelta(minutes=5)
+        await env.engine.send_queued_once()
+    assert calls == ["0", "0", "0"] and env.engine.status()["paused"] == []
+    assert env.notifier.calls == [("incident", "kleinanzeigen", "slow")]   # после 3 подряд — одно сообщение
+    env.clock.now += timedelta(minutes=5)
+    await env.engine.send_queued_once()
+    assert env.store.get(1).status == "sent"
+    assert ("kleinanzeigen", "slow") not in env.store.open_incidents()
+
+
+async def test_digest_counts_expired_and_skipped_by_event_time(pauses):
+    env = Env()
+    env.ka.listings = [L(), L(ext_id="2", street="Gasse 2", contact_name="K2"), L(ext_id="3", street="Gasse 3", contact_name="K3")]
+    env.clock.now = datetime(2026, 10, 20, 15, 0)   # черновики созданы вчера
+    await env.engine.poll_once("kleinanzeigen")
+    await env.engine.skip(3)
+    env.clock.now = datetime(2026, 10, 21, 15, 0)   # 17:00 в Бонне: вчерашние устарели сегодня
+    await env.engine.skip(2)
+    await env.engine.maintenance_once()
+    env.clock.now = datetime(2026, 10, 21, 18, 0)   # 20:00 в Бонне — сводка
+    await env.engine.maintenance_once()
+    stats = env.notifier.names("digest")[0][1]
+    assert stats["expired"] == 1 and stats["skipped"] == 1 and stats["drafts_waiting"] == 0
+
+
+# ---------- несколько страниц выдачи ----------
+
+class PagedSource(FakeSource):
+    def __init__(self, name, pages):
+        super().__init__(name, pages[0])
+        self.pages, self.asked = pages, []
+
+    async def search_more(self, page, n):
+        self.asked.append(n)
+        return list(self.pages[n - 1]) if n <= len(self.pages) else list(self.pages[0])   # за концом — снова первая
+
+
+STREETS = ("Ahornweg", "Birkenweg", "Eichenweg", "Lindenweg", "Buchenweg", "Erlenweg", "Tannenweg", "Kiefernweg")
+
+
+def pages_of(*sizes):
+    out, k = [], 0
+    for size in sizes:
+        out.append([L(ext_id=str(k + i), street=f"{STREETS[k + i]} 5", contact_name=f"K {k + i}")
+                    for i in range(size)])
+        k += size
+    return out
+
+
+async def test_next_pages_only_while_all_new(pauses):
+    env = Env()
+    env.ka = env.engine.sources["kleinanzeigen"] = PagedSource("kleinanzeigen", pages_of(2, 2, 2, 2))
+    await env.engine.poll_once("kleinanzeigen")   # первый запуск: все новые — 3 страницы, не больше
+    assert env.ka.asked == [2, 3] and len(env.store.by_status("draft")) == 6
+    await env.engine.poll_once("kleinanzeigen")   # первая страница знакома — дальше не идём
+    assert env.ka.asked == [2, 3]
+
+
+async def test_rescan_reads_next_pages(pauses):
+    env = Env()
+    env.ka = env.engine.sources["kleinanzeigen"] = PagedSource("kleinanzeigen", pages_of(2, 2))
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.ka.asked == [2, 3]   # третьей нет — сайт вернул первую, новых нет
+    env.engine.rescan()
+    await env.engine.poll_once("kleinanzeigen")
+    assert env.ka.asked == [2, 3, 2, 3]
+
+
+async def test_next_page_failure_keeps_first(pauses):
+    env = Env()
+    env.ka = env.engine.sources["kleinanzeigen"] = PagedSource("kleinanzeigen", pages_of(2, 2))
+
+    async def boom(page, n):
+        raise RuntimeError("timeout")
+    env.ka.search_more = boom
+    await env.engine.poll_once("kleinanzeigen")
+    assert len(env.store.by_status("draft")) == 2
+
+
+async def test_restore_on_captcha_pauses_and_keeps_row():
+    env = Env()
+    await env.engine.process("kleinanzeigen", L())
+    env.store.set_status(1, "skipped", reason="черновик устарел")
+    env.engine._listings.clear()
+
+    async def captcha(page, l):
+        raise BlockedError("captcha")
+    env.ka.fetch_detail = captcha
+    assert await env.engine.restore(1) == "blocked"
+    assert env.store.get(1).status == "skipped" and "kleinanzeigen" in env.engine.status()["paused"]
+
+
+async def test_captcha_on_next_page_pauses(pauses):
+    env = Env()
+    env.ka = env.engine.sources["kleinanzeigen"] = PagedSource("kleinanzeigen", pages_of(2, 2))
+
+    async def captcha(page, n):
+        raise BlockedError("captcha")
+    env.ka.search_more = captcha
+    await env.engine.poll_once("kleinanzeigen")
+    assert "kleinanzeigen" in env.engine.status()["paused"] and env.store.by_status("draft") == []

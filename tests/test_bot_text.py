@@ -36,8 +36,8 @@ def test_format_reply_without_row():
 
 
 @pytest.mark.parametrize("kind,word", [
-    ("captcha", "капч"), ("logged_out", "вход"), ("blocked", "блокир"),
-    ("broken", "структур"), ("send", "отправ"), ("ai", "нейросет")])
+    ("captcha", "проверк"), ("logged_out", "аккаунт"), ("blocked", "блокир"),
+    ("broken", "разобрать"), ("slow", "медленно"), ("send", "отправ"), ("ai", "нейросет")])
 def test_format_incident_per_kind(kind, word):
     s = format_incident("kleinanzeigen", kind, "детали XYZ")
     assert word in s.lower() and "детали XYZ" in s
@@ -91,6 +91,14 @@ def test_profile_steps_cover_fields():
 def test_digest_lists_filter_reasons():
     s = format_digest({"found": 12, "sent": 3, "filtered": {"дороже 900 €": 7}, "duplicates": 1, "replies": 1, "failed": 0})
     assert "12" in s and "дороже 900 €: 7" in s
+
+
+def test_digest_lists_missed_drafts():
+    s = format_digest({"found": 1, "sent": 0, "filtered": {}, "duplicates": 0, "replies": 2, "failed": 0,
+                       "skipped": 1, "expired": 3, "drafts_waiting": 2})
+    assert "Пропущено вами: 1" in s and "устарело без ответа: 3" in s and "Ждут решения сейчас: 2" in s
+    assert "Ответов: 2" in s
+    assert "устарело" not in format_digest({"found": 0, "expired": 0})
 
 
 def test_format_status():
