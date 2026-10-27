@@ -519,7 +519,11 @@ class Engine:
         if row.status != "skipped":
             return row.status
         try:
-            l = self._listings.get(id) or await self._detail(row.platform, self._row_listing(row))
+            l = self._listings.get(id) or await self._detail(row.platform, self._row_listing(row), check_pause=True)
+        except (Paused, BlockedError) as e:
+            if isinstance(e, BlockedError):   # капча или выход: площадка на паузе, как при опросе
+                await self._block(row.platform, e.kind, str(e))
+            return "blocked"
         except Exception as e:
             log.info("%s #%s: черновик не вернуть — объявление не загрузилось: %r", row.platform, id, e)
             return "load_failed"
@@ -627,6 +631,8 @@ class Engine:
             await human_pause(2, 5)
             try:
                 batch = [l for l in await src.search_more(pg, n) if l.ext_id not in seen]
+            except BlockedError:   # капча или выход — как на первой странице: пауза в poll_once
+                raise
             except Exception as e:   # первая страница уже есть — обработаем её
                 log.warning("%s: страница %d выдачи не загрузилась: %r", platform, n, e)
                 break

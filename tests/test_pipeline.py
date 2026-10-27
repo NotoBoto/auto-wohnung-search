@@ -1334,3 +1334,27 @@ async def test_next_page_failure_keeps_first(pauses):
     env.ka.search_more = boom
     await env.engine.poll_once("kleinanzeigen")
     assert len(env.store.by_status("draft")) == 2
+
+
+async def test_restore_on_captcha_pauses_and_keeps_row():
+    env = Env()
+    await env.engine.process("kleinanzeigen", L())
+    env.store.set_status(1, "skipped", reason="черновик устарел")
+    env.engine._listings.clear()
+
+    async def captcha(page, l):
+        raise BlockedError("captcha")
+    env.ka.fetch_detail = captcha
+    assert await env.engine.restore(1) == "blocked"
+    assert env.store.get(1).status == "skipped" and "kleinanzeigen" in env.engine.status()["paused"]
+
+
+async def test_captcha_on_next_page_pauses(pauses):
+    env = Env()
+    env.ka = env.engine.sources["kleinanzeigen"] = PagedSource("kleinanzeigen", pages_of(2, 2))
+
+    async def captcha(page, n):
+        raise BlockedError("captcha")
+    env.ka.search_more = captcha
+    await env.engine.poll_once("kleinanzeigen")
+    assert "kleinanzeigen" in env.engine.status()["paused"] and env.store.by_status("draft") == []

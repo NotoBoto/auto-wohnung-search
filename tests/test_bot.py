@@ -318,8 +318,8 @@ async def test_skip_button(env):
     assert "draft text" not in q.edits[0][0]
 
 
-@pytest.mark.parametrize("result,text", [("draft", None), ("load_failed", "сняли с сайта"),
-                                         ("filtered", "Больше не подходит")])
+@pytest.mark.parametrize("result,text", [("draft", None), ("filtered", "Больше не подходит"),
+                                         ("duplicate", "письмо уже есть")])
 async def test_restore_button(env, result, text):
     env.engine.restore_result = result
     q = Query(f"restore:{env.id}")
@@ -554,3 +554,24 @@ async def test_rescan_command(env, result, text):
     u, m = upd(OWNER)
     await env.bot.cmd_rescan(u, ctx())
     assert env.engine.calls == [("rescan",)] and text in m.replies[0]
+
+
+@pytest.mark.parametrize("result", ["load_failed", "blocked"])
+async def test_restore_transient_failure_keeps_button(env, result):
+    env.engine.restore_result = result
+    q = Query(f"restore:{env.id}")
+    await env.bot.on_callback(upd(OWNER, query=q)[0], ctx())
+    text, markup = q.edits[-1]
+    assert "ещё раз" in text and [b.callback_data for r in markup.inline_keyboard for b in r] == [f"restore:{env.id}"]
+
+
+async def test_edit_after_expiry_keeps_restore_button(env):
+    q = Query(f"edit:{env.id}")
+    u, _ = upd(OWNER, query=q)
+    await env.bot.on_callback(u, ctx())
+    env.store.set_status(env.id, "skipped", reason="черновик устарел")
+    u, m = upd(OWNER, "Mein neuer Text")
+    await env.bot.on_text(u, ctx())
+    assert not [c for c in env.engine.calls if c[0] in ("approve", "regenerate")]
+    text, markup = q.edits[-1]
+    assert text.startswith("⌛ Черновик устарел") and markup is not None and "устарел" in m.replies[-1]

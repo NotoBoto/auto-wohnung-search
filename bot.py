@@ -24,6 +24,7 @@ MAX_LEN = 4096               # предел длины сообщения Telegr
 _STEP_FIELDS = [f for f, _ in PROFILE_STEPS]
 _QUESTIONS = dict(PROFILE_STEPS)
 
+EXPIRED_MARK = "⌛ Черновик устарел"
 HELP = ("Команды:\n/status — состояние\n/pause [площадка], /resume [площадка]\n"
         "/mode auto|confirm [площадка]\n/filters [max_warm 950 min_rooms 3 min_lease_months 12]\n"
         "/profile — заполнить или показать; /profile <поле> [значение]; /profile hide|show <поле>\n"
@@ -38,6 +39,10 @@ def _scrub(text: str, token: str) -> str:
 
 def _kb(*rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d) for t, d in row] for row in rows])
+
+
+def _restore_kb(id: int) -> InlineKeyboardMarkup:
+    return _kb([("Вернуть черновик", f"restore:{id}")])
 
 
 class TelegramNotifier:
@@ -177,8 +182,7 @@ class TelegramNotifier:
     async def expire_draft(self, row: Row) -> None:
         if not row.draft_msg_id:
             return
-        kb = _kb([("Вернуть черновик", f"restore:{row.id}")])
-        self._enqueue(lambda: self._edit(row.draft_msg_id, format_done(row, "⌛ Черновик устарел"), kb))
+        self._enqueue(lambda: self._edit(row.draft_msg_id, format_done(row, EXPIRED_MARK), _restore_kb(row.id)))
 
     async def draft_reminder(self, rows: list[Row], hours: int) -> None:
         self._push(format_draft_reminder(rows, hours))
@@ -437,6 +441,11 @@ class OwnerBot:
             id, draft_msg, prompt_msg = self.pending_edit.pop(chat)
             await self._delete(prompt_msg)
             await self._delete(update.effective_message)
+            if self.store.get(id).status == "skipped":   # черновик устарел, пока писали: кнопка «Вернуть» остаётся
+                await self._with_restore(draft_msg, id, EXPIRED_MARK)
+                await self._say(update, "Черновик устарел, пока вы писали. Нажмите «Вернуть черновик» и "
+                                        "пришлите правку ещё раз.")
+                return
             try:
                 if text.startswith("!"):
                     # старый черновик удалится, когда придёт новый
@@ -494,12 +503,22 @@ class OwnerBot:
 
     def _restore_outcome(self, id: int, status: str) -> str:
         reason = self.store.get(id).reason
-        return {"load_failed": "✗ Объявление не загрузилось — возможно, его сняли с сайта",
+        return {"load_failed": "✗ Объявление не загрузилось — возможно, его сняли с сайта. Можно попробовать ещё раз",
+                "blocked": "Площадка на паузе (проверка «вы не бот» или вход) — после входа нажмите ещё раз",
                 "filtered": f"✗ Больше не подходит: {reason}",
                 "duplicate": f"✗ По этой квартире письмо уже есть ({reason})",
                 "ask_dup": "Похоже на знакомое объявление — см. вопрос ниже",
                 "seen": "Ждёт заполнения профиля (/profile)",
                 "failed": f"✗ Письмо не создано: {reason}"}.get(status, f"Статус: {status}")
+
+    async def _with_restore(self, message, id: int, mark: str) -> None:
+        """Строка-итог с кнопкой «Вернуть черновик» (устаревший черновик, временный сбой возврата)."""
+        if message is None:
+            return
+        try:
+            await message.edit_text(format_done(self.store.get(id), mark)[:MAX_LEN], reply_markup=_restore_kb(id))
+        except Exception as e:
+            log.debug("сообщение #%s не изменено: %s", id, e)
 
     def _skip_outcome(self, id: int) -> str:
         status = self.store.get(id).status
@@ -548,6 +567,9 @@ class OwnerBot:
             status = await e.restore(id)
             if status == "draft":
                 return None   # новый черновик уже заменил это сообщение
+            if status in ("load_failed", "blocked"):   # временно: можно нажать ещё раз
+                await self._with_restore(update.callback_query.message, id, self._restore_outcome(id, status))
+                return None
             return self._restore_outcome(id, status)
         if kind == "dup":
             if arg == "send":
