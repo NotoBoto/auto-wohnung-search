@@ -12,7 +12,7 @@ def test_load_config_fills_nested_defaults(tmp_path, monkeypatch):
 
 
 def test_identity():
-    assert core.REPO == "NotoBoto/auto-wohnung-search" and core.VERSION == "0.1.0"
+    assert core.REPO == "NotoBoto/auto-wohnung-search" and core.VERSION == "0.2.0"
 
 
 def test_save_config_atomic(tmp_path, monkeypatch):
