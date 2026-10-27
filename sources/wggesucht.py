@@ -6,7 +6,7 @@ from datetime import datetime
 from browser import human_pause, human_type
 from models import Listing, parse_area, parse_money, parse_rooms
 from sources.base import (AlreadyContactedError, BlockedError, MissingFieldError, NotSubmittedError, Source,
-                          SourceBroken, listing_flags)
+                          SourceBroken, listing_flags, open_page)
 
 log = logging.getLogger(__name__)
 
@@ -195,8 +195,7 @@ class WgGesucht(Source):
         return None
 
     async def _open(self, page, url: str) -> str:
-        await page.goto(url)
-        await page.wait_for_load_state("load")
+        await open_page(page, url)
         await accept_consent(page)
         html = await page.content()
         if kind := self.detect_block(html, page.url):
@@ -213,8 +212,7 @@ class WgGesucht(Source):
     async def is_logged_in(self, page) -> bool:
         """Выход из аккаунта: на странице есть форма входа #login_form (модальное окно «Anmelden»)."""
         if not page.url.startswith(BASE):
-            await page.goto(BASE)
-            await page.wait_for_load_state("load")
+            await open_page(page, BASE)
             await accept_consent(page)
         if kind := self.detect_block(await page.content(), page.url):
             if kind != "logged_out":

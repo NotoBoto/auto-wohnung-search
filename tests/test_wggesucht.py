@@ -202,6 +202,22 @@ async def test_send_ok(fast):
     assert page.typed == "Hallo" and page.submitted and "nachrichten-id=" in page.url   # перешли в переписку
 
 
+class SlowAdsPage(FakePage):
+    """Реклама держит событие «load» дольше таймаута (вживую на выдаче 2026-10-27)."""
+    async def wait_for_load_state(self, state=None, **kw):
+        if state == "load":
+            raise TimeoutError("Timeout 30000ms exceeded")
+
+
+async def test_search_and_send_do_not_wait_for_ads_load(fast):
+    page = SlowAdsPage(html=read("wggesucht/search.html"))
+    assert await WgGesucht().search(page)
+    assert page.wait_until == "domcontentloaded"
+    page = SlowAdsPage(WG_FORM)
+    await WgGesucht().send(page, Listing("wggesucht", "14258763", URL), "Hallo", {})
+    assert page.wait_until == "domcontentloaded" and page.submitted
+
+
 async def test_send_form_missing_is_not_submitted(fast):
     page = FakePage(())
     with pytest.raises(NotSubmittedError):
@@ -232,7 +248,7 @@ class ConvPage:
     """Форма сообщения для объявления, где переписка уже есть: сайт сразу ведёт в чат."""
     url = CONV_URL
 
-    async def goto(self, url): pass
+    async def goto(self, url, **kw): pass
     async def wait_for_load_state(self, *a, **k): pass
     async def content(self): return "<h3>Unterhaltung mit Max Mustermann</h3><textarea id='message_input'></textarea>"
     def locator(self, sel): raise AssertionError("в чат печатать нельзя")
