@@ -154,3 +154,20 @@ def test_listing_flags(text, key, value):
 def test_listing_flags_negation_stops_at_punctuation(text, key):
     from sources.base import listing_flags
     assert listing_flags(text)[key] is True
+
+
+class SlowAdsPage(FakePage):
+    """Реклама держит событие «load» дольше таймаута."""
+    async def goto(self, url, wait_until="load", **kw):
+        if wait_until == "load":
+            raise TimeoutError("Timeout 30000ms exceeded")
+        await super().goto(url)
+
+    async def wait_for_load_state(self, state="load", **kw):
+        if state == "load":
+            raise TimeoutError("Timeout 30000ms exceeded")
+
+
+async def test_search_does_not_wait_for_ads_load():
+    res = await FakeSource().search(SlowAdsPage("<ok>"))
+    assert [l.ext_id for l in res] == ["1"]

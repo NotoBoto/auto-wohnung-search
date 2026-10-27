@@ -10,6 +10,7 @@ from store import Store
 
 TZ = ZoneInfo("Europe/Berlin")
 NIGHT_END_HOUR = 7   # ночь: 00:00–06:59 местного времени
+LOAD_WAIT_MS = 10000   # сколько ждать «load» после разметки; дольше — страница держится на рекламе
 
 
 _NEG = r"(?<!\w)(?:kein|keine|keinen|keiner|ohne|nicht)[^\w.,;:!?\n]+(?:\w+[^\w.,;:!?\n]+){0,2}?"
@@ -63,6 +64,16 @@ class MissingFieldError(RuntimeError):
         self.field = field
 
 
+async def open_page(page, url: str) -> None:
+    """Переход без ожидания рекламы: «load» бывает дольше 30 с (вживую на всех площадках, 2026-10-26/27),
+    поэтому ждём разметку, а «load» — не дольше LOAD_WAIT_MS."""
+    await page.goto(url, wait_until="domcontentloaded")
+    try:
+        await page.wait_for_load_state("load", timeout=LOAD_WAIT_MS)
+    except Exception:
+        pass
+
+
 class Source(ABC):
     name: str
     login_url: str
@@ -88,8 +99,7 @@ class Source(ABC):
         """'captcha' | 'logged_out' | 'blocked' | None."""
 
     async def _load(self, page, url: str) -> str:
-        await page.goto(url)
-        await page.wait_for_load_state("load")
+        await open_page(page, url)
         html = await page.content()
         kind = self.detect_block(html, page.url)
         if kind:
