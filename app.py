@@ -547,7 +547,7 @@ class App(ctk.CTk):
         self.snap: dict = {}   # последний снимок состояния площадок
 
         self.title("Auto Wohnung Search")
-        self.geometry("1000x700")
+        self.geometry("1100x700")
         self.minsize(820, 560)
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -988,9 +988,10 @@ class App(ctk.CTk):
         """Площадки: состояние, последний опрос, отправлено за сегодня; кнопки «Войти» и «Пауза»."""
         box = ctk.CTkFrame(tab)
         box.pack(fill="x", padx=4, pady=4)
-        for col, w in enumerate((150, 190, 190, 170)):
+        # кнопки — сразу за состоянием: в узком окне обрезаются столбцы с цифрами, а не «Продолжить»
+        for col, w in ((0, 150), (1, 190), (3, 110), (4, 120)):
             box.grid_columnconfigure(col, minsize=w)
-        for col, title in enumerate(("Площадка", "Состояние", "Последний опрос", "Отправлено сегодня")):
+        for col, title in ((0, "Площадка"), (1, "Состояние"), (3, "Последний опрос"), (4, "Отправлено сегодня")):
             ctk.CTkLabel(box, text=title, text_color="gray").grid(row=0, column=col, sticky="w", padx=14, pady=(8, 2))
         self.plat_ui: dict[str, dict] = {}
         for i, (key, name, cls) in enumerate(PLATFORM_ROWS, start=1):
@@ -1005,11 +1006,11 @@ class App(ctk.CTk):
             else:
                 ctk.CTkLabel(box, text=name, font=ctk.CTkFont(weight="bold")).grid(row=i, column=0, sticky="w",
                                                                                    padx=14, pady=6)
-            for col, k in enumerate(("state", "poll", "sent"), start=1):
+            for col, k in ((1, "state"), (3, "poll"), (4, "sent")):
                 ui[k].grid(row=i, column=col, sticky="w", padx=14)
             if cls:
                 btns = ctk.CTkFrame(box, fg_color="transparent")
-                btns.grid(row=i, column=4, sticky="e", padx=10)
+                btns.grid(row=i, column=2, sticky="w", padx=4)
                 ui["run"] = ctk.CTkButton(btns, text="▶ Только эту", width=120, fg_color=GREEN,
                                           hover_color=GREEN_HOVER, command=lambda k=key: self.on_run_one(k))
                 ui["run"].pack(side="left", padx=3)
@@ -1019,7 +1020,7 @@ class App(ctk.CTk):
                                             command=lambda k=key: self.on_pause(k))
                 ui["pause"].pack(side="left", padx=3)
             self.plat_ui[key] = ui
-        box.grid_columnconfigure(4, weight=1)
+        box.grid_columnconfigure(5, weight=1)
         self.counts_lbl = ctk.CTkLabel(tab, text="", anchor="w", justify="left")
         self.counts_lbl.pack(fill="x", padx=18, pady=(10, 2))
         self.hints_lbl = ctk.CTkLabel(tab, text="", anchor="w", justify="left", wraplength=900, text_color=AMBER)
@@ -1029,6 +1030,8 @@ class App(ctk.CTk):
             "действует сразу). «▶ Только эту» — запустить одну площадку; во время работы — добавить её к запуску. "
             "«↻ Пройти заново» сверху — заново прислать черновики по всем подходящим объявлениям, по которым письмо "
             "ещё не ушло (и пропущенным тоже); прежние сообщения о них в Telegram удаляются. "
+            "«▶ Продолжить» — снять паузу площадки, в том числе после проблемы (капча, сбой страницы): "
+            "программа сразу пробует снова. "
             "Всем остальным (черновики, фильтры, профиль, режим «авто / подтверждать») управляет Telegram-бот. "
             "Immowelt появится в следующих версиях.")).pack(fill="x", padx=18, pady=(4, 0))
 
@@ -1091,7 +1094,9 @@ class App(ctk.CTk):
             cap = self.conf["platforms"][key]["daily_cap"]
             ui["sent"].configure(text=f"{st['sent'][key]} из {cap}")
             paused = st["paused_all"] or key in st["paused"]
-            ui["pause"].configure(text="Продолжить" if paused else "Пауза", state="normal" if running else "disabled")
+            ui["pause"].configure(text="▶ Продолжить" if paused else "Пауза", state="normal" if running else "disabled",
+                                  fg_color=GREEN if paused and running else GRAY,
+                                  hover_color=GREEN_HOVER if paused and running else GRAY_HOVER)
             ui["run"].configure(text="▶ Добавить" if running else "▶ Только эту",
                                 state="disabled" if self.busy or key in st["active"] else "normal")
             if key not in self.login_btns:   # во время входа кнопка «Войти» занята другим
@@ -1118,6 +1123,10 @@ class App(ctk.CTk):
             hints.append("Gmail не указан — ответы арендодателей определяться не будут.")
         if not profile_complete(c["profile"]):
             hints.append("Профиль не заполнен — заполни профиль в боте: /profile.")
+        stopped = [name for key, name, cls in PLATFORM_ROWS if cls and running and key in st["active"]
+                   and (st["paused_all"] or key in st["paused"])]
+        if stopped:
+            hints.append(f"На паузе: {', '.join(stopped)}. Разобрались с причиной — нажмите «▶ Продолжить» у площадки.")
         self.hints_lbl.configure(text="\n".join(hints))
         self.snap = st
         if running and not self.busy and self.status in ("running", "problem"):   # устаревший снимок не «оживляет»

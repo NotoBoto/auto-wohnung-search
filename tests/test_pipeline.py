@@ -1358,3 +1358,34 @@ async def test_captcha_on_next_page_pauses(pauses):
     env.ka.search_more = captcha
     await env.engine.poll_once("kleinanzeigen")
     assert "kleinanzeigen" in env.engine.status()["paused"] and env.store.by_status("draft") == []
+
+
+async def test_gone_listing_not_retried_and_platform_not_paused():
+    # вживую 2026-10-28: повтор снятого объявления открыл выдачу категории → «не распознано» → пауза площадки
+    env = Env()
+    i = env.store.add(L(), 800)
+    env.store.set_status(i, "failed", reason="объявление снято с сайта")
+
+    async def broken(page, l):
+        raise SourceBroken("kleinanzeigen: объявление не распознано")
+    env.ka.fetch_detail = broken
+    await env.engine.maintenance_once()
+    assert not env.engine._paused_now("kleinanzeigen") and env.store.open_incidents() == []
+    assert env.store.get(i).status == "failed"
+
+
+async def test_retry_of_listing_gone_meanwhile_marks_it_gone_without_pause():
+    env = Env()
+    env.ai.exc = AIError("нейросеть недоступна")
+    await env.engine.process("kleinanzeigen", L())                      # #1 failed
+    env.ai.exc = None
+    env.store.close_incidents("ai")
+    env.engine._listings.clear()
+
+    async def gone(page, l):
+        raise ListingGoneError("kleinanzeigen: объявление снято")
+    env.ka.fetch_detail = gone
+    await env.engine.maintenance_once()
+    row = env.store.get(1)
+    assert row.status == "failed" and row.reason == "объявление снято с сайта"
+    assert not env.engine._paused_now("kleinanzeigen") and len(env.ai.calls) == 1

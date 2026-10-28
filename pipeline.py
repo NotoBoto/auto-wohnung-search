@@ -718,13 +718,17 @@ class Engine:
             row = self.store.get(snap.id)
             key = f"retried:{row.id}"
             if (row.status != "failed" or row.created_at < since or row.reason.startswith(LOAD_FAILED)
-                    or self.store.get_meta(key) or self._paused_now(row.platform)):
+                    or row.reason == GONE or self.store.get_meta(key) or self._paused_now(row.platform)):
                 continue
             if row.id not in self._listings and row.platform not in self.sources:
                 continue
             try:
                 l = self._listings.get(row.id) or await self._detail(row.platform, self._row_listing(row), check_pause=True)
             except Paused:
+                continue
+            except ListingGoneError:   # сняли, пока ждали повтора: площадка исправна, повторять нечего
+                self.store.set_status(row.id, "failed", reason=GONE)
+                log.info("%s: #%s не повторяем — объявление снято с сайта", row.platform, row.id)
                 continue
             except BlockedError as e:   # площадка на паузе; повторим после неё, если 24 ч не прошли
                 await self._block(row.platform, e.kind, str(e))

@@ -19,7 +19,9 @@ _BLOCK_RE = re.compile(r"geetest|captcha|Zugriff verweigert|Access Denied", re.I
 # Временная блокировка диапазона IP («IP-Bereich vorübergehend gesperrt») — не капча, её не решить
 _IP_BAN_RE = re.compile(r"IP-Bereich[^<]{0,40}gesperrt|ip-eingeschraenkt", re.I)
 _NORMAL_MARKERS = ('id="viewad-title"', "srchrslt", "data-adid=")
-_LOGGED_IN = "[data-testid='logged-in-user']"   # «angemeldet als …» в шапке — пользователь вошёл
+# «angemeldet als …» в шапке — пользователь вошёл; на «Meine Anzeigen»/«Nachrichten» шапка другая: #user-email,
+# #user-logout «Ausloggen» (вживую 2026-10-28)
+_LOGGED_IN = "[data-testid='logged-in-user'], #user-email, #user-logout"
 _LOGIN_BUTTON = "[data-testid='login-button']"   # «Einloggen» в шапке — пользователь не вошёл (не проверено вживую)
 # форма объявлений Immobilien (снята вживую 2026-10-26): окно <dialog>, поля без name, id меняются при каждой загрузке —
 # ищем по подписи; «Anrede» и «Schufa Nachweis» — обязательные списки (combobox → option)
@@ -172,7 +174,10 @@ class Kleinanzeigen(Source):
         return self.parse_search(await self._open(page, self.page_url(self.filters, n)))
 
     async def fetch_detail(self, page, l: Listing) -> Listing:
-        return self.parse_detail(await self._open(page, l.url), l)
+        html = await self._open(page, l.url)
+        if "/s-anzeige/" not in page.url:   # снятое объявление отдаёт 301 на выдачу категории
+            raise ListingGoneError(f"kleinanzeigen: объявление снято, открылось {page.url}")
+        return self.parse_detail(html, l)
 
     async def is_logged_in(self, page) -> bool:
         """Вход: в шапке «angemeldet als …» (data-testid=logged-in-user, проверено вживую).
