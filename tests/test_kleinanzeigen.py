@@ -157,6 +157,19 @@ async def test_is_logged_in_by_user_marker_without_full_load():
     assert page.wait_until == "domcontentloaded"   # «load» главной ждёт рекламу дольше 30 с
 
 
+async def test_is_logged_in_on_account_pages():
+    # «Meine Anzeigen» / «Nachrichten»: другая шапка — #user-email «angemeldet als …», #user-logout (вживую 2026-10-28)
+    for sel in ("#user-email", "#user-logout"):
+        assert await Kleinanzeigen().is_logged_in(FakePage((sel,), url="https://www.kleinanzeigen.de/m-nachrichten.html"))
+
+
+async def test_fetch_detail_redirected_to_category_is_gone():
+    page = FakePage(html="<html><ul id='srchrslt-adtable'></ul></html>",
+                    url="https://www.kleinanzeigen.de/s-wohnung-mieten/bonn/c203l1")
+    with pytest.raises(ListingGoneError):
+        await Kleinanzeigen().fetch_detail(page, AD)
+
+
 async def test_is_logged_in_false_without_user_marker():
     assert not await Kleinanzeigen().is_logged_in(FakePage())
 
